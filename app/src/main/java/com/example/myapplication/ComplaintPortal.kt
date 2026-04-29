@@ -1,5 +1,6 @@
 package com.example.myapplication
 
+import android.app.TimePickerDialog
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -123,7 +124,7 @@ data class Announcement(
 data class WaterSchedule(
     val id: String = UUID.randomUUID().toString(),
     val valveNumber: String = "",
-    val date: String = "",
+    val dateMillis: Long = 0L,
     val openTime: String = "",
     val closeTime: String = "",
     val timestamp: Long = System.currentTimeMillis()
@@ -387,21 +388,18 @@ class SocietyViewModel : ViewModel() {
         addNotificationToFirebase("Announcement", "New Announcement: $title")
     }
 
-    fun addWaterSchedule(valveNumber: String, date: String, openTime: String, closeTime: String) {
+    fun addWaterSchedule(valveNumber: String, dateMillis: Long, openTime: String, closeTime: String) {
         val schedule = WaterSchedule(
             id = UUID.randomUUID().toString(),
             valveNumber = valveNumber,
-            date = date,
+            dateMillis = dateMillis,
             openTime = openTime,
             closeTime = closeTime,
             timestamp = System.currentTimeMillis()
         )
+        val date = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(dateMillis))
         database.child("waterSchedules").child(schedule.id).setValue(schedule)
         addNotificationToFirebase("Schedule Update", "Water schedule for $valveNumber on $date has been added")
-    }
-
-    fun removeWaterSchedule(schedule: WaterSchedule) {
-        database.child("waterSchedules").child(schedule.id).removeValue()
     }
 
     fun addContact(label: String, value: String, type: ContactType) {
@@ -664,19 +662,19 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                 bottomBar = {
                     NavigationBar {
                         NavigationBarItem(
-                            icon = { Icon(Icons.Default.Dashboard, contentDescription = null) },
-                            label = { Text("Dashboard") },
+                            icon = { Icon(Icons.Default.ReportProblem, contentDescription = null) },
+                            label = { Text("Complaints") },
                             selected = selectedTab == 0,
                             onClick = { selectedTab = 0 }
                         )
                         NavigationBarItem(
-                            icon = { Icon(Icons.Default.ReportProblem, contentDescription = null) },
-                            label = { Text("Complaints") },
+                            icon = { Icon(Icons.Default.WaterDrop, contentDescription = null) },
+                            label = { Text("Water Schedule") },
                             selected = selectedTab == 1,
                             onClick = { selectedTab = 1 }
                         )
                         NavigationBarItem(
-                            icon = { Icon(Icons.Default.Campaign, contentDescription = null, modifier = Modifier.size(32.dp)) },
+                            icon = { Icon(Icons.Default.Campaign, contentDescription = null) },
                             label = { Text("Announcements") },
                             selected = selectedTab == 2,
                             onClick = { selectedTab = 2 }
@@ -691,8 +689,8 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                 ) {
                     Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                         when (selectedTab) {
-                            0 -> DashboardScreen(viewModel, isAdminMode || isSuperAdminMode, isSuperAdminMode)
-                            1 -> if (isAdminMode || isSuperAdminMode) AdminComplaintScreen(viewModel, isSuperAdminMode) else UserComplaintScreen(viewModel)
+                            0 -> if (isAdminMode || isSuperAdminMode) AdminComplaintScreen(viewModel, isSuperAdminMode) else UserComplaintScreen(viewModel)
+                            1 -> WaterScheduleScreen(viewModel, isAdminMode || isSuperAdminMode, isSuperAdminMode)
                             2 -> AnnouncementScreen(viewModel, isAdminMode || isSuperAdminMode, isSuperAdminMode)
                         }
                     }
@@ -945,219 +943,179 @@ fun WelcomeScreen(onEnter: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DashboardScreen(viewModel: SocietyViewModel, isAdmin: Boolean, isSuperAdmin: Boolean) {
-    var showValveDialog by remember { mutableStateOf(false) }
+fun WaterScheduleScreen(viewModel: SocietyViewModel, isAdmin: Boolean, isSuperAdmin: Boolean) {
+    val context = LocalContext.current
+    val datePickerState = rememberDatePickerState()
+    var showAddScheduleDialog by remember { mutableStateOf(false) }
+
+    // Dialog state
     var valveNumberInput by remember { mutableStateOf("") }
-    var dateInput by remember { mutableStateOf("") }
     var openTimeInput by remember { mutableStateOf("") }
     var closeTimeInput by remember { mutableStateOf("") }
     
-    var showContactDialog by remember { mutableStateOf(false) }
-    var contactLabel by remember { mutableStateOf("") }
-    var contactValue by remember { mutableStateOf("") }
-    var contactType by remember { mutableStateOf(ContactType.PHONE) }
-    
-    var showUserLogDialog by remember { mutableStateOf(false) }
+    // Time Picker Logic
+    val timeFormat = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
+    val openTimePickerDialog = TimePickerDialog(
+        context,
+        { _, hour, minute ->
+            val cal = Calendar.getInstance()
+            cal.set(Calendar.HOUR_OF_DAY, hour)
+            cal.set(Calendar.MINUTE, minute)
+            openTimeInput = timeFormat.format(cal.time)
+        },
+        Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
+        Calendar.getInstance().get(Calendar.MINUTE),
+        false // 12-hour format
+    )
+    val closeTimePickerDialog = TimePickerDialog(
+        context,
+        { _, hour, minute ->
+            val cal = Calendar.getInstance()
+            cal.set(Calendar.HOUR_OF_DAY, hour)
+            cal.set(Calendar.MINUTE, minute)
+            closeTimeInput = timeFormat.format(cal.time)
+        },
+        Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
+        Calendar.getInstance().get(Calendar.MINUTE),
+        false // 12-hour format
+    )
 
-    if (showValveDialog) {
+    // Use derived state to avoid recomposition on every scroll of the date picker
+    val selectedDateMillis by remember {
+        derivedStateOf {
+            datePickerState.selectedDateMillis ?: System.currentTimeMillis()
+        }
+    }
+
+    // Dialog for adding a schedule
+    if (showAddScheduleDialog) {
+        val dateForDialog = datePickerState.selectedDateMillis ?: System.currentTimeMillis()
         AlertDialog(
-            onDismissRequest = { 
-                showValveDialog = false
-                valveNumberInput = ""; dateInput = ""; openTimeInput = ""; closeTimeInput = ""
-            },
-            title = { Text("Add Water Schedule") },
+            onDismissRequest = { showAddScheduleDialog = false },
+            title = { Text("Add Schedule for ${SimpleDateFormat("dd MMM", Locale.getDefault()).format(Date(dateForDialog))}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = valveNumberInput, onValueChange = { valveNumberInput = it }, label = { Text("Valve Number / Area") })
-                    OutlinedTextField(value = dateInput, onValueChange = { dateInput = it }, label = { Text("Date (e.g. 28 Oct)") })
-                    OutlinedTextField(value = openTimeInput, onValueChange = { openTimeInput = it }, label = { Text("Open Time (e.g. 09:00 AM)") })
-                    OutlinedTextField(value = closeTimeInput, onValueChange = { closeTimeInput = it }, label = { Text("Close Time (e.g. 11:00 AM)") })
+                    OutlinedTextField(
+                        value = valveNumberInput, 
+                        onValueChange = { valveNumberInput = it }, 
+                        label = { Text("Valve Number / Area") }
+                    )
+                    // Open Time Picker
+                    Box(modifier = Modifier.clickable { openTimePickerDialog.show() }) {
+                        OutlinedTextField(
+                            value = openTimeInput, 
+                            onValueChange = {}, 
+                            label = { Text("Open Time") },
+                            readOnly = true,
+                            enabled = false, // To make it look like a button
+                            colors = OutlinedTextFieldDefaults.colors(
+                                disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                                disabledBorderColor = MaterialTheme.colorScheme.outline,
+                                disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    // Close Time Picker
+                    Box(modifier = Modifier.clickable { closeTimePickerDialog.show() }) {
+                        OutlinedTextField(
+                            value = closeTimeInput, 
+                            onValueChange = {}, 
+                            label = { Text("Close Time") },
+                            readOnly = true,
+                            enabled = false, // To make it look like a button
+                             colors = OutlinedTextFieldDefaults.colors(
+                                disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                                disabledBorderColor = MaterialTheme.colorScheme.outline,
+                                disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Button(onClick = {
-                    if (valveNumberInput.isNotBlank() && dateInput.isNotBlank()) {
-                        viewModel.addWaterSchedule(valveNumberInput, dateInput, openTimeInput, closeTimeInput)
-                        showValveDialog = false
-                        valveNumberInput = ""; dateInput = ""; openTimeInput = ""; closeTimeInput = ""
+                    if (valveNumberInput.isNotBlank() && openTimeInput.isNotBlank() && closeTimeInput.isNotBlank()) {
+                        viewModel.addWaterSchedule(valveNumberInput, dateForDialog, openTimeInput, closeTimeInput)
+                        showAddScheduleDialog = false
+                        // Reset fields
+                        valveNumberInput = ""
+                        openTimeInput = ""
+                        closeTimeInput = ""
+                    } else {
+                        Toast.makeText(context, "Please fill all fields", Toast.LENGTH_SHORT).show()
                     }
-                }) { Text("Add") }
+                }) {
+                    Text("Save")
+                }
             },
             dismissButton = {
-                TextButton(onClick = { 
-                    showValveDialog = false
-                    valveNumberInput = ""; dateInput = ""; openTimeInput = ""; closeTimeInput = ""
-                }) { Text("Cancel") }
+                TextButton(onClick = { showAddScheduleDialog = false }) { Text("Cancel") }
             }
         )
     }
 
-    if (showContactDialog) {
-        AlertDialog(
-            onDismissRequest = { showContactDialog = false },
-            title = { Text("Add New Contact") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = contactLabel, onValueChange = { contactLabel = it }, label = { Text("Label (e.g. Electrician)") })
-                    OutlinedTextField(value = contactValue, onValueChange = { contactValue = it }, label = { Text("Phone or Email") })
-                    
-                    Text("Type:", style = MaterialTheme.typography.labelMedium)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = contactType == ContactType.PHONE, onClick = { contactType = ContactType.PHONE })
-                        Text("Phone", modifier = Modifier.clickable { contactType = ContactType.PHONE })
-                        Spacer(Modifier.width(16.dp))
-                        RadioButton(selected = contactType == ContactType.EMAIL, onClick = { contactType = ContactType.EMAIL })
-                        Text("Email", modifier = Modifier.clickable { contactType = ContactType.EMAIL })
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    if (contactLabel.isNotBlank() && contactValue.isNotBlank()) {
-                        viewModel.addContact(contactLabel, contactValue, contactType)
-                        showContactDialog = false
-                        contactLabel = ""; contactValue = ""
-                    }
-                }) { Text("Add Contact") }
-            },
-            dismissButton = { TextButton(onClick = { showContactDialog = false }) { Text("Cancel") } }
-        )
-    }
-    
-    if (showUserLogDialog) {
-        AlertDialog(
-            onDismissRequest = { showUserLogDialog = false },
-            title = { Text("Registered Users Log") },
-            text = {
-                if (viewModel.registeredUsers.isEmpty()) {
-                    Text("No users registered yet.")
-                } else {
-                    LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                        items(viewModel.registeredUsers) { user ->
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Column(modifier = Modifier.weight(1f).padding(vertical = 8.dp)) {
-                                    Text("${user.name} (${user.userType})", fontWeight = FontWeight.Bold)
-                                    Text("House: ${user.houseNumber}", style = MaterialTheme.typography.bodySmall)
-                                    Text("Phone: ${user.phone}", style = MaterialTheme.typography.bodySmall)
-                                    Text(
-                                        SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(user.registrationDate)),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color.Gray
-                                    )
-                                    HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
-                                }
-                                if (isSuperAdmin) {
-                                    IconButton(onClick = { viewModel.deleteUser(user.phone) }) {
-                                        Icon(Icons.Default.Delete, contentDescription = "Delete User", tint = Color.Red)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = { showUserLogDialog = false }) { Text("Close") }
-            }
-        )
-    }
+    Column(modifier = Modifier.fillMaxSize()) {
+        Text("Water Supply Calendar", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 16.dp))
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Surface(
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "Welcome to KN Gohar Green City",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                    textAlign = TextAlign.Center
-                )
-                Text(
-                    text = "Residents Portal",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.secondary,
-                    letterSpacing = 2.sp
-                )
-                
-                if (isAdmin) {
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = { showUserLogDialog = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
-                    ) {
-                        Icon(Icons.Default.People, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("View Registered Users")
-                    }
-                }
+        // The Calendar View
+        DatePicker(
+            state = datePickerState,
+            title = null,
+            headline = null,
+            showModeToggle = false,
+            colors = DatePickerDefaults.colors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha=0.3f)
+            )
+        )
+
+        // Admin button to add a schedule for the selected date
+        if(isAdmin) {
+            Button(
+                onClick = { 
+                    // Reset time fields when opening the dialog
+                    openTimeInput = ""
+                    closeTimeInput = ""
+                    showAddScheduleDialog = true 
+                },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                enabled = datePickerState.selectedDateMillis != null
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                val buttonText = if(datePickerState.selectedDateMillis != null)
+                    "Add Schedule for ${SimpleDateFormat("dd MMM", Locale.getDefault()).format(Date(selectedDateMillis))}"
+                else "Select a date to add a schedule"
+                Text(buttonText)
             }
         }
 
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Water Supply Schedules", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            if (isAdmin) {
-                IconButton(onClick = { showValveDialog = true }) {
-                    Icon(Icons.Default.AddCircle, contentDescription = "Add Schedule", tint = MaterialTheme.colorScheme.primary)
-                }
+        HorizontalDivider(modifier = Modifier.padding(bottom = 12.dp))
+
+        Text("Schedules for ${SimpleDateFormat("EEEE, dd MMM yyyy", Locale.getDefault()).format(Date(selectedDateMillis))}", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+
+        // Get schedules for the selected day
+        val schedulesForSelectedDate = remember(selectedDateMillis, viewModel.waterSchedules) {
+            val cal1 = Calendar.getInstance().apply { timeInMillis = selectedDateMillis }
+            viewModel.waterSchedules.filter {
+                val cal2 = Calendar.getInstance().apply { timeInMillis = it.dateMillis }
+                cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
+                cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
             }
         }
-        
-        if (viewModel.waterSchedules.isEmpty()) {
-            ElevatedCard(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                    Text("No water schedules submitted yet.", color = Color.Gray)
-                }
+
+        if (schedulesForSelectedDate.isEmpty()) {
+            Box(modifier=Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                 Text("No schedules for this date.", color=Color.Gray)
             }
         } else {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                viewModel.waterSchedules.forEach { schedule ->
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(schedulesForSelectedDate) { schedule ->
                     WaterScheduleCard(schedule, isSuperAdmin, onDelete = { viewModel.deleteWaterSchedule(schedule.id) })
-                }
-            }
-        }
-        
-        HorizontalDivider()
-        
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Society Contacts", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            if (isAdmin) {
-                IconButton(onClick = { showContactDialog = true }) {
-                    Icon(Icons.Default.AddCircle, contentDescription = "Add Contact", tint = MaterialTheme.colorScheme.primary)
-                }
-            }
-        }
-
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            viewModel.contacts.chunked(2).forEach { rowContacts ->
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rowContacts.forEach { contact ->
-                        val icon = when(contact.type) {
-                            ContactType.PHONE -> Icons.Default.Phone
-                            ContactType.EMAIL -> Icons.Default.Email
-                            ContactType.OTHER -> Icons.Default.Info
-                        }
-                        Box(modifier = Modifier.weight(1f)) {
-                            InfoChip(
-                                label = "${contact.label}: ${contact.value}", 
-                                icon = icon,
-                                isSuperAdmin = isSuperAdmin,
-                                onDelete = { viewModel.removeContact(contact) }
-                            )
-                        }
-                    }
-                    if (rowContacts.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
         }
@@ -1182,10 +1140,9 @@ fun WaterScheduleCard(schedule: WaterSchedule, isSuperAdmin: Boolean, onDelete: 
                     Text(text = "Valve: ${schedule.valveNumber}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(text = "Date: ${schedule.date}", style = MaterialTheme.typography.bodyMedium)
                 Text(
                     text = "Time: ${schedule.openTime} - ${schedule.closeTime}", 
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.secondary
                 )
             }

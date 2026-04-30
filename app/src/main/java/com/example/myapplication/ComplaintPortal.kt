@@ -603,7 +603,7 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                         title = { 
                             Column {
                                 val userName = sharedPrefs.getString("user_name", "Resident")
-                                Text("KN Gohar Green City", style = MaterialTheme.typography.titleMedium)
+                                    Text("KN GGC", style = MaterialTheme.typography.titleMedium)
                                 Text(
                                     if (isSuperAdminMode) "⭐ Super Admin" 
                                     else if (isAdminMode) "🛠️ Admin Panel" 
@@ -910,7 +910,7 @@ fun WelcomeScreen(onEnter: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
             Text(
-                "Your Smart Residents Portal for Complaints, News, and Water Schedules.", 
+                "Your Smart Residents Portal for Complaints, News, and Water Schedules.",
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)

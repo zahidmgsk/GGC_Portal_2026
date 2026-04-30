@@ -1,19 +1,25 @@
 package com.example.myapplication
 
+import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import android.view.View
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -29,6 +35,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.StarBorder
@@ -42,6 +50,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -57,9 +66,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.example.myapplication.ui.theme.AppTheme
+import com.example.myapplication.ui.theme.ComplaintPortalTheme
+import com.example.myapplication.ui.theme.ThemeViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.GenericTypeIndicator
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ValueEventListener
 import com.google.firebase.database.database
@@ -67,12 +80,22 @@ import com.google.firebase.database.PropertyName
 import com.google.firebase.storage.storage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
+import androidx.compose.material.icons.filled.SupervisorAccount
+import androidx.core.content.FileProvider
 
 enum class ComplaintStatus {
     PENDING, IN_PROGRESS, RESOLVED
 }
+
+data class Admin(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "",
+    val password: String = ""
+)
 
 data class ContactInfo(
     val id: String = UUID.randomUUID().toString(),
@@ -118,15 +141,16 @@ data class Announcement(
     val id: Int = 0,
     val title: String = "",
     val content: String = "",
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val reactions: Map<String, String> = emptyMap(), // Key: userId, Value: emoji
+    val sharedBy: List<String> = emptyList()
 )
 
 data class WaterSchedule(
     val id: String = UUID.randomUUID().toString(),
     val valveNumber: String = "",
-    val dateMillis: Long = 0L,
-    val openTime: String = "",
-    val closeTime: String = "",
+    val startDateTimeMillis: Long = 0L,
+    val endDateTimeMillis: Long = 0L,
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -150,6 +174,9 @@ class SocietyViewModel : ViewModel() {
     
     private val _notifications = mutableStateListOf<AppNotification>()
     val notifications: List<AppNotification> get() = _notifications
+    
+    private val _admins = mutableStateListOf<Admin>()
+    val admins: List<Admin> get() = _admins
     
     private var nextComplaintId = 1
     private var nextAnnouncementId = 1
@@ -198,6 +225,7 @@ class SocietyViewModel : ViewModel() {
                 snapshot.children.forEach { child ->
                     child.getValue(Complaint::class.java)?.let { _complaints.add(it) }
                 }
+                _complaints.sortByDescending { it.id }
                 nextComplaintId = (_complaints.maxOfOrNull { it.id } ?: 0) + 1
             }
             override fun onCancelled(error: DatabaseError) { Log.e("Firebase", error.message) }
@@ -268,6 +296,23 @@ class SocietyViewModel : ViewModel() {
             }
             override fun onCancelled(error: DatabaseError) { Log.e("Firebase", error.message) }
         })
+
+        // Observe Admins
+        database.child("admins").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                _admins.clear()
+                snapshot.children.forEach { child ->
+                    child.getValue(Admin::class.java)?.let { _admins.add(it) }
+                }
+            }
+            override fun onCancelled(error: DatabaseError) { Log.e("Firebase", error.message) }
+        })
+    }
+
+    fun addAdmin(name: String, password: String) {
+        val admin = Admin(name = name, password = password)
+        database.child("admins").child(admin.id).setValue(admin)
+        notificationMessage = "Admin '$name' added"
     }
 
     fun registerUser(name: String, phone: String, houseNumber: String, userType: String) {
@@ -303,7 +348,12 @@ class SocietyViewModel : ViewModel() {
                 snapshot.children.forEach { child ->
                     val notification = child.getValue(AppNotification::class.java)
                     if (notification != null && !notification.isRead) {
-                        if (isAdmin || (notification.targetHouse == null || notification.targetHouse == userHouse)) {
+                        val isAdminNotification = notification.isForAdmin
+                        val isUserNotification = !notification.isForAdmin && (notification.targetHouse == null || notification.targetHouse == userHouse)
+
+                        if (isAdmin && isAdminNotification) {
+                            child.ref.child("isRead").setValue(true)
+                        } else if (!isAdmin && isUserNotification) {
                             child.ref.child("isRead").setValue(true)
                         }
                     }
@@ -388,18 +438,57 @@ class SocietyViewModel : ViewModel() {
         addNotificationToFirebase("Announcement", "New Announcement: $title")
     }
 
-    fun addWaterSchedule(valveNumber: String, dateMillis: Long, openTime: String, closeTime: String) {
+    fun addReactionToAnnouncement(announcementId: Int, reaction: String, userId: String, isAdmin: Boolean) {
+    if (isAdmin) return
+        val announcementRef = database.child("announcements").child(announcementId.toString())
+        announcementRef.child("reactions").get().addOnSuccessListener { dataSnapshot ->
+            val typeIndicator = object : GenericTypeIndicator<MutableMap<String, String>>() {}
+            val reactions = dataSnapshot.getValue(typeIndicator) ?: mutableMapOf()
+
+            // If the user has already reacted with the same emoji, remove their reaction.
+            if (reactions[userId] == reaction) {
+                reactions.remove(userId)
+            } else {
+                // Otherwise, add or update their reaction.
+                reactions[userId] = reaction
+            }
+
+            announcementRef.child("reactions").setValue(reactions)
+        }.addOnFailureListener {
+            Log.e("Firebase", "Failed to update reaction", it)
+        }
+    }
+
+    fun shareAnnouncement(announcementId: Int, userId: String) {
+        val announcementRef = database.child("announcements").child(announcementId.toString())
+        announcementRef.child("sharedBy").get().addOnSuccessListener {
+            val sharedByList = it.getValue(object : GenericTypeIndicator<List<String>>() {}) ?: emptyList()
+            if (!sharedByList.contains(userId)) {
+                val newList = sharedByList.toMutableList()
+                newList.add(userId)
+                announcementRef.child("sharedBy").setValue(newList)
+            }
+        }
+    }
+
+    fun addWaterSchedule(valveNumber: String, startDateTimeMillis: Long, endDateTimeMillis: Long) {
         val schedule = WaterSchedule(
             id = UUID.randomUUID().toString(),
             valveNumber = valveNumber,
-            dateMillis = dateMillis,
-            openTime = openTime,
-            closeTime = closeTime,
+            startDateTimeMillis = startDateTimeMillis,
+            endDateTimeMillis = endDateTimeMillis,
             timestamp = System.currentTimeMillis()
         )
-        val date = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(dateMillis))
         database.child("waterSchedules").child(schedule.id).setValue(schedule)
-        addNotificationToFirebase("Schedule Update", "Water schedule for $valveNumber on $date has been added")
+        val startDate = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(startDateTimeMillis))
+        val endDate = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(endDateTimeMillis))
+        addNotificationToFirebase("Schedule Update", "Water schedule for $valveNumber from $startDate to $endDate has been added")
+    }
+
+    fun editWaterSchedule(schedule: WaterSchedule) {
+        database.child("waterSchedules").child(schedule.id).setValue(schedule)
+        val date = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(schedule.startDateTimeMillis))
+        addNotificationToFirebase("Schedule Update", "Water schedule for ${schedule.valveNumber} on $date has been updated")
     }
 
     fun addContact(label: String, value: String, type: ContactType) {
@@ -439,6 +528,11 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
     val context = LocalContext.current
     val sharedPrefs = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val themeViewModel: ThemeViewModel = viewModel(factory = object : androidx.lifecycle.ViewModelProvider.Factory {
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            return ThemeViewModel(sharedPrefs) as T
+        }
+    })
 
     // Request Notification Permission for Android 13+
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -472,7 +566,8 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
     
     var isAdminMode by remember { mutableStateOf(false) }
     var isSuperAdminMode by remember { mutableStateOf(false) }
-    var showLoginDialog by remember { mutableStateOf(false) }
+    var showAdminLoginDialog by remember { mutableStateOf(false) }
+    var showSuperAdminLoginDialog by remember { mutableStateOf(false) }
     var showChangePasswordDialog by remember { mutableStateOf(false) }
     var showNotificationCenter by remember { mutableStateOf(false) }
     var passwordInput by remember { mutableStateOf("") }
@@ -481,226 +576,359 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
 
     var showWelcomeScreen by remember { mutableStateOf(true) }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (!isRegistered) {
-            RegistrationScreen { name, phone, house, type ->
-                sharedPrefs.edit()
-                    .putString("user_name", name)
-                    .putString("user_phone", phone)
-                    .putString("user_house", house)
-                    .putString("user_type", type)
-                    .apply()
-                viewModel.registerUser(name, phone, house, type)
-                isRegistered = true
-            }
-        } else if (showWelcomeScreen) {
-            WelcomeScreen(onEnter = { showWelcomeScreen = false })
-        } else {
-            if (showNotificationCenter) {
-                val registeredHouse = sharedPrefs.getString("user_house", "") ?: ""
-                NotificationCenterDialog(
-                    notifications = viewModel.notifications,
-                    isAdmin = isAdminMode || isSuperAdminMode,
-                    userHouse = registeredHouse,
-                    onMarkRead = { viewModel.markNotificationAsRead(it) },
-                    onMarkAllRead = { viewModel.markAllNotificationsAsRead(isAdminMode || isSuperAdminMode, registeredHouse) },
-                    onDismiss = { showNotificationCenter = false }
-                )
-            }
+    BackHandler(enabled = selectedTab != 0) {
+        selectedTab = 0
+    }
 
-            if (showLoginDialog) {
-                AlertDialog(
-                    onDismissRequest = { showLoginDialog = false },
-                    title = { Text("Admin Login") },
-                    text = {
-                        OutlinedTextField(
-                            value = passwordInput,
-                            onValueChange = { passwordInput = it },
-                            label = { Text("Enter Password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true
-                        )
-                    },
-                    confirmButton = {
-                        Button(onClick = {
-                            if (passwordInput == viewModel.superAdminPassword) {
-                                isSuperAdminMode = true
-                                isAdminMode = false
-                                showLoginDialog = false
-                                passwordInput = ""
-                            } else if (passwordInput == viewModel.adminPassword) {
-                                isAdminMode = true
-                                isSuperAdminMode = false
-                                showLoginDialog = false
-                                passwordInput = ""
-                            } else {
-                                Toast.makeText(context, "Invalid Password", Toast.LENGTH_SHORT).show()
-                            }
-                        }) {
-                            Text("Login")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showLoginDialog = false; passwordInput = "" }) {
-                            Text("Cancel")
-                        }
-                    }
-                )
-            }
+    ComplaintPortalTheme(themeViewModel = themeViewModel) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (!isRegistered) {
+                RegistrationScreen(onRegister = { name, phone, house, type ->
+                    sharedPrefs.edit()
+                        .putString("user_name", name)
+                        .putString("user_phone", phone)
+                        .putString("user_house", house)
+                        .putString("user_type", type)
+                        .apply()
+                    viewModel.registerUser(name, phone, house, type)
+                    isRegistered = true
+                }, onAdminLogin = { showAdminLoginDialog = true })
+            } else if (showWelcomeScreen) {
+                WelcomeScreen(onEnter = { showWelcomeScreen = false })
+            } else {
+                if (showNotificationCenter) {
+                    val registeredHouse = sharedPrefs.getString("user_house", "") ?: ""
+                    NotificationCenterDialog(
+                        notifications = viewModel.notifications,
+                        isAdmin = isAdminMode || isSuperAdminMode,
+                        userHouse = registeredHouse,
+                        onMarkRead = { viewModel.markNotificationAsRead(it) },
+                        onMarkAllRead = { viewModel.markAllNotificationsAsRead(isAdminMode || isSuperAdminMode, registeredHouse) },
+                        onDismiss = { showNotificationCenter = false }
+                    )
+                }
 
-            if (showChangePasswordDialog) {
-                var newAdminPass by remember { mutableStateOf("") }
-                var newSuperPass by remember { mutableStateOf("") }
-                
-                AlertDialog(
-                    onDismissRequest = { showChangePasswordDialog = false },
-                    title = { Text(if (isSuperAdminMode) "Change Passwords" else "Change Admin Password") },
-                    text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (showAdminLoginDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showAdminLoginDialog = false },
+                        title = { Text("Admin Login") },
+                        text = {
                             OutlinedTextField(
-                                value = newAdminPass,
-                                onValueChange = { newAdminPass = it },
-                                label = { Text("New Admin Password") },
+                                value = passwordInput,
+                                onValueChange = { passwordInput = it },
+                                label = { Text("Enter Password") },
                                 visualTransformation = PasswordVisualTransformation(),
                                 singleLine = true
                             )
-                            if (isSuperAdminMode) {
+                        },
+                        confirmButton = {
+                            Button(onClick = {
+                                if (passwordInput == viewModel.adminPassword) {
+                                    isAdminMode = true
+                                    isSuperAdminMode = false
+                                    showAdminLoginDialog = false
+                                    passwordInput = ""
+                                    isRegistered = true
+                                } else {
+                                    Toast.makeText(context, "Invalid Password", Toast.LENGTH_SHORT).show()
+                                }
+                            }) {
+                                Text("Login")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showAdminLoginDialog = false; passwordInput = "" }) {
+                                Text("Cancel")
+                            }
+                        }
+                    )
+                }
+
+                if (showSuperAdminLoginDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showSuperAdminLoginDialog = false },
+                        title = { Text("Super Admin Login") },
+                        text = {
+                            OutlinedTextField(
+                                value = passwordInput,
+                                onValueChange = { passwordInput = it },
+                                label = { Text("Enter Password") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true
+                            )
+                        },
+                        confirmButton = {
+                            Button(onClick = {
+                                if (passwordInput == viewModel.superAdminPassword) {
+                                    isSuperAdminMode = true
+                                    isAdminMode = false
+                                    showSuperAdminLoginDialog = false
+                                    passwordInput = ""
+                                } else {
+                                    Toast.makeText(context, "Invalid Password", Toast.LENGTH_SHORT).show()
+                                }
+                            }) {
+                                Text("Login")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showSuperAdminLoginDialog = false; passwordInput = "" }) {
+                                Text("Cancel")
+                            }
+                        }
+                    )
+                }
+
+                if (showChangePasswordDialog) {
+                    var newAdminPass by remember { mutableStateOf("") }
+                    var newSuperPass by remember { mutableStateOf("") }
+                    
+                    AlertDialog(
+                        onDismissRequest = { showChangePasswordDialog = false },
+                        title = { Text(if (isSuperAdminMode) "Change Passwords" else "Change Admin Password") },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedTextField(
-                                    value = newSuperPass,
-                                    onValueChange = { newSuperPass = it },
-                                    label = { Text("New Super Admin Password") },
+                                    value = newAdminPass,
+                                    onValueChange = { newAdminPass = it },
+                                    label = { Text("New Admin Password") },
                                     visualTransformation = PasswordVisualTransformation(),
                                     singleLine = true
                                 )
+                                if (isSuperAdminMode) {
+                                    OutlinedTextField(
+                                        value = newSuperPass,
+                                        onValueChange = { newSuperPass = it },
+                                        label = { Text("New Super Admin Password") },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        singleLine = true
+                                    )
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            Button(onClick = {
+                                if (newAdminPass.isNotBlank()) {
+                                    viewModel.changeAdminPassword(newAdminPass)
+                                }
+                                if (isSuperAdminMode && newSuperPass.isNotBlank()) {
+                                    viewModel.changeSuperAdminPassword(newSuperPass)
+                                }
+                                showChangePasswordDialog = false
+                            }) {
+                                Text("Update")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showChangePasswordDialog = false }) {
+                                Text("Cancel")
                             }
                         }
-                    },
-                    confirmButton = {
-                        Button(onClick = {
-                            if (newAdminPass.isNotBlank()) {
-                                viewModel.changeAdminPassword(newAdminPass)
-                            }
-                            if (isSuperAdminMode && newSuperPass.isNotBlank()) {
-                                viewModel.changeSuperAdminPassword(newSuperPass)
-                            }
-                            showChangePasswordDialog = false
-                        }) {
-                            Text("Update")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showChangePasswordDialog = false }) {
-                            Text("Cancel")
-                        }
-                    }
-                )
-            }
+                    )
+                }
 
-            Scaffold(
-                modifier = Modifier.imePadding(),
-                topBar = {
-                    TopAppBar(
-                        title = { 
-                            Column {
+                Scaffold(
+                    modifier = Modifier.imePadding(),
+                    topBar = {
+                        TopAppBar(
+                            title = { 
                                 val userName = sharedPrefs.getString("user_name", "Resident")
-                                    Text("KN GGC", style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    if (isSuperAdminMode) "⭐ Super Admin" 
-                                    else if (isAdminMode) "🛠️ Admin Panel" 
+                                    if (isSuperAdminMode) "Super Admin" 
+                                    else if (isAdminMode) "Admin Panel" 
                                     else "Hi, $userName", 
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isSuperAdminMode) MaterialTheme.colorScheme.primary else Color.Unspecified
                                 )
-                            }
-                        },
-                        actions = {
-                            IconButton(onClick = { showNotificationCenter = true }) {
-                                BadgedBox(
-                                    badge = { 
-                                        val displayHouse = sharedPrefs.getString("user_house", "") ?: ""
-                                        val unreadCount = if (isAdminMode || isSuperAdminMode) {
-                                            viewModel.notifications.count { !it.isRead }
-                                        } else {
-                                            viewModel.notifications.count { !it.isRead && (!it.isForAdmin && (it.targetHouse == null || it.targetHouse == displayHouse)) }
+                            },
+                            actions = {
+                                IconButton(onClick = { showNotificationCenter = true }) {
+                                    BadgedBox(
+                                        badge = { 
+                                            val displayHouse = sharedPrefs.getString("user_house", "") ?: ""
+                                            val unreadCount = if (isAdminMode || isSuperAdminMode) {
+                                                viewModel.notifications.count { !it.isRead && it.isForAdmin }
+                                            } else {
+                                                viewModel.notifications.count { !it.isRead && (!it.isForAdmin && (it.targetHouse == null || it.targetHouse == displayHouse)) }
+                                            }
+                                            if (unreadCount > 0) {
+                                                Badge { Text(unreadCount.toString()) }
+                                            }
                                         }
-                                        if (unreadCount > 0) {
-                                            Badge { Text(unreadCount.toString()) }
+                                    ) {
+                                        Icon(Icons.Default.Notifications, contentDescription = "Notifications")
+                                    }
+                                }
+                                ThemeSelector(themeViewModel = themeViewModel)
+                                if (isAdminMode || isSuperAdminMode) {
+                                    IconButton(onClick = { showChangePasswordDialog = true }) {
+                                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                    }
+                                    Button(
+                                        onClick = { isAdminMode = false; isSuperAdminMode = false },
+                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                                    ) {
+                                        Text("Logout", color = Color.White)
+                                    }
+                                } else {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            onClick = { showAdminLoginDialog = true },
+                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                        ) {
+                                            Icon(Icons.Default.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(18.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Admin")
+                                        }
+                                        Button(
+                                            onClick = { showSuperAdminLoginDialog = true },
+                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                        ) {
+                                            Icon(Icons.Default.SupervisorAccount, contentDescription = null, modifier = Modifier.size(18.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Super Admin")
                                         }
                                     }
-                                ) {
-                                    Icon(Icons.Default.Notifications, contentDescription = "Notifications")
                                 }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = if (isSuperAdminMode) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer,
+                                titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        )
+                    },
+                    bottomBar = {
+                        NavigationBar {
+                            NavigationBarItem(
+                                icon = { Icon(Icons.Default.ReportProblem, contentDescription = null) },
+                                label = { Text("Complaints") },
+                                selected = selectedTab == 0,
+                                onClick = { selectedTab = 0 }
+                            )
+                            NavigationBarItem(
+                                icon = { Icon(Icons.Default.WaterDrop, contentDescription = null) },
+                                label = { Text("Water Schedule") },
+                                selected = selectedTab == 1,
+                                onClick = { selectedTab = 1 }
+                            )
+                            NavigationBarItem(
+                                icon = { Icon(Icons.Default.Campaign, contentDescription = null) },
+                                label = { Text("Announcements") },
+                                selected = selectedTab == 2,
+                                onClick = { selectedTab = 2 }
+                            )
+                            if (isSuperAdminMode) {
+                                NavigationBarItem(
+                                    icon = { Icon(Icons.Default.AdminPanelSettings, contentDescription = null) },
+                                    label = { Text("Admins") },
+                                    selected = selectedTab == 3,
+                                    onClick = { selectedTab = 3 }
+                                )
                             }
-                            if (isAdminMode || isSuperAdminMode) {
-                                IconButton(onClick = { showChangePasswordDialog = true }) {
-                                    Icon(Icons.Default.Settings, contentDescription = "Settings")
-                                }
-                                Button(
-                                    onClick = { isAdminMode = false; isSuperAdminMode = false },
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                                ) {
-                                    Text("Logout", color = Color.White)
-                                }
-                            } else {
-                                Button(
-                                    onClick = { showLoginDialog = true },
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                                ) {
-                                    Icon(Icons.Default.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Admin Access")
-                                }
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = if (isSuperAdminMode) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer,
-                            titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    )
-                },
-                bottomBar = {
-                    NavigationBar {
-                        NavigationBarItem(
-                            icon = { Icon(Icons.Default.ReportProblem, contentDescription = null) },
-                            label = { Text("Complaints") },
-                            selected = selectedTab == 0,
-                            onClick = { selectedTab = 0 }
-                        )
-                        NavigationBarItem(
-                            icon = { Icon(Icons.Default.WaterDrop, contentDescription = null) },
-                            label = { Text("Water Schedule") },
-                            selected = selectedTab == 1,
-                            onClick = { selectedTab = 1 }
-                        )
-                        NavigationBarItem(
-                            icon = { Icon(Icons.Default.Campaign, contentDescription = null) },
-                            label = { Text("Announcements") },
-                            selected = selectedTab == 2,
-                            onClick = { selectedTab = 2 }
-                        )
+                        }
                     }
-                }
-            ) { innerPadding ->
-                PullToRefreshBox(
-                    isRefreshing = viewModel.isRefreshing,
-                    onRefresh = { viewModel.refreshData() },
-                    modifier = Modifier.padding(innerPadding).fillMaxSize()
-                ) {
-                    Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                        when (selectedTab) {
-                            0 -> if (isAdminMode || isSuperAdminMode) AdminComplaintScreen(viewModel, isSuperAdminMode) else UserComplaintScreen(viewModel)
-                            1 -> WaterScheduleScreen(viewModel, isAdminMode || isSuperAdminMode, isSuperAdminMode)
-                            2 -> AnnouncementScreen(viewModel, isAdminMode || isSuperAdminMode, isSuperAdminMode)
+                ) { innerPadding ->
+                    PullToRefreshBox(
+                        isRefreshing = viewModel.isRefreshing,
+                        onRefresh = { viewModel.refreshData() },
+                        modifier = Modifier.padding(innerPadding).fillMaxSize()
+                    ) {
+                        val userName = sharedPrefs.getString("user_name", "Resident") ?: ""
+                        Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                            when (selectedTab) {
+                                0 -> if (isAdminMode || isSuperAdminMode) AdminComplaintScreen(viewModel, isSuperAdminMode) else UserComplaintScreen(viewModel, userName)
+                                1 -> WaterScheduleScreen(viewModel, isAdminMode || isSuperAdminMode)
+                                2 -> AnnouncementScreen(viewModel, isAdminMode || isSuperAdminMode)
+                                3 -> if (isSuperAdminMode) AdminManagementScreen(viewModel) else Box { }
+                            }
                         }
                     }
                 }
             }
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
+            )
         }
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
+    }
+}
+
+@Composable
+fun AdminManagementScreen(viewModel: SocietyViewModel) {
+    var adminName by remember { mutableStateOf("") }
+    var adminPassword by remember { mutableStateOf("") }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Text("Manage Admins", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(16.dp))
+        OutlinedTextField(
+            value = adminName,
+            onValueChange = { adminName = it },
+            label = { Text("Admin Name") },
+            modifier = Modifier.fillMaxWidth()
         )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = adminPassword,
+            onValueChange = { adminPassword = it },
+            label = { Text("Admin Password") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Button(
+            onClick = {
+                if (adminName.isNotBlank() && adminPassword.isNotBlank()) {
+                    viewModel.addAdmin(adminName, adminPassword)
+                    adminName = ""
+                    adminPassword = ""
+                }
+            },
+            modifier = Modifier.align(Alignment.End)
+        ) {
+            Text("Add Admin")
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Current Admins", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            items(viewModel.admins) { admin ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(admin.name)
+                    // Optional: Add a delete button for admins
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ThemeSelector(themeViewModel: ThemeViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Default.Palette, contentDescription = "Theme")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            AppTheme.entries.forEach { theme ->
+                DropdownMenuItem(
+                    text = { Text(theme.displayName) },
+                    onClick = { 
+                        themeViewModel.setTheme(theme)
+                        expanded = false 
+                    }
+                )
+            }
+        }
     }
 }
 
@@ -725,7 +953,7 @@ fun NotificationCenterDialog(
         },
         text = {
             val filteredNotifications = if (isAdmin) {
-                notifications
+                notifications.filter { it.isForAdmin }
             } else {
                 notifications.filter { !it.isForAdmin && (it.targetHouse == null || it.targetHouse == userHouse) }
             }
@@ -780,7 +1008,7 @@ fun NotificationCenterDialog(
 }
 
 @Composable
-fun RegistrationScreen(onRegister: (String, String, String, String) -> Unit) {
+fun RegistrationScreen(onRegister: (String, String, String, String) -> Unit, onAdminLogin: () -> Unit) {
     var name by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
     var houseNumber by remember { mutableStateOf("") }
@@ -875,13 +1103,43 @@ fun RegistrationScreen(onRegister: (String, String, String, String) -> Unit) {
                 ) {
                     Text("Register", fontSize = 18.sp)
                 }
+
+                TextButton(onClick = onAdminLogin) {
+                    Text("Login as Admin")
+                }
             }
         }
     }
 }
 
 @Composable
+fun AboutDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.Info, contentDescription = "About") },
+        title = { Text(text = "About") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(text = "Version 1.1.0", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(8.dp))
+                Text(text = "Developed by: Zahid Choudhry", style = MaterialTheme.typography.bodyMedium)
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
 fun WelcomeScreen(onEnter: () -> Unit) {
+    var showAboutDialog by remember { mutableStateOf(false) }
+
+    if (showAboutDialog) {
+        AboutDialog(onDismiss = { showAboutDialog = false })
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -895,14 +1153,14 @@ fun WelcomeScreen(onEnter: () -> Unit) {
         ) {
             Spacer(Modifier.weight(1f))
             Icon(
-                Icons.Default.Eco, 
-                contentDescription = null, 
-                modifier = Modifier.size(100.dp), 
+                Icons.Default.Eco,
+                contentDescription = null,
+                modifier = Modifier.size(100.dp),
                 tint = MaterialTheme.colorScheme.primary
             )
             Spacer(Modifier.height(24.dp))
             Text(
-                "Welcome to\nKN Gohar Green City", 
+                "Welcome to\nKN Gohar Green City",
                 style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center,
@@ -910,7 +1168,7 @@ fun WelcomeScreen(onEnter: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
             Text(
-                "Your Smart Residents Portal for Complaints, News, and Water Schedules.",
+                "Your Smart Residents Portal",
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
@@ -924,19 +1182,27 @@ fun WelcomeScreen(onEnter: () -> Unit) {
                 Text("Enter Portal", fontSize = 18.sp)
             }
             Spacer(Modifier.weight(1f))
-            
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 16.dp)) {
-                Text(
-                    "Progressive Panel", 
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .padding(bottom = 16.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable { showAboutDialog = true }
+                    .padding(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SupervisorAccount, // Placeholder for the logo
+                    contentDescription = "About",
+                    modifier = Modifier.size(60.dp),
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    "(The well wishers of GGC)", 
+                    "Progressive Panel",
                     style = MaterialTheme.typography.bodySmall,
-                    fontStyle = FontStyle.Italic,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp)
                 )
             }
         }
@@ -945,177 +1211,94 @@ fun WelcomeScreen(onEnter: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WaterScheduleScreen(viewModel: SocietyViewModel, isAdmin: Boolean, isSuperAdmin: Boolean) {
-    val context = LocalContext.current
-    val datePickerState = rememberDatePickerState()
-    var showAddScheduleDialog by remember { mutableStateOf(false) }
+fun WaterScheduleScreen(viewModel: SocietyViewModel, isAdmin: Boolean) {
+    var showEditDialog by remember { mutableStateOf(false) }
+    var editingSchedule by remember { mutableStateOf<WaterSchedule?>(null) }
+    var viewingSchedule by remember { mutableStateOf<WaterSchedule?>(null) }
+    var showCalendar by remember { mutableStateOf(false) }
 
-    // Dialog state
-    var valveNumberInput by remember { mutableStateOf("") }
-    var openTimeInput by remember { mutableStateOf("") }
-    var closeTimeInput by remember { mutableStateOf("") }
-    
-    // Time Picker Logic
-    val timeFormat = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
-    val openTimePickerDialog = TimePickerDialog(
-        context,
-        { _, hour, minute ->
-            val cal = Calendar.getInstance()
-            cal.set(Calendar.HOUR_OF_DAY, hour)
-            cal.set(Calendar.MINUTE, minute)
-            openTimeInput = timeFormat.format(cal.time)
-        },
-        Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
-        Calendar.getInstance().get(Calendar.MINUTE),
-        false // 12-hour format
-    )
-    val closeTimePickerDialog = TimePickerDialog(
-        context,
-        { _, hour, minute ->
-            val cal = Calendar.getInstance()
-            cal.set(Calendar.HOUR_OF_DAY, hour)
-            cal.set(Calendar.MINUTE, minute)
-            closeTimeInput = timeFormat.format(cal.time)
-        },
-        Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
-        Calendar.getInstance().get(Calendar.MINUTE),
-        false // 12-hour format
-    )
-
-    // Use derived state to avoid recomposition on every scroll of the date picker
-    val selectedDateMillis by remember {
-        derivedStateOf {
-            datePickerState.selectedDateMillis ?: System.currentTimeMillis()
-        }
-    }
-
-    // Dialog for adding a schedule
-    if (showAddScheduleDialog) {
-        val dateForDialog = datePickerState.selectedDateMillis ?: System.currentTimeMillis()
-        AlertDialog(
-            onDismissRequest = { showAddScheduleDialog = false },
-            title = { Text("Add Schedule for ${SimpleDateFormat("dd MMM", Locale.getDefault()).format(Date(dateForDialog))}") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = valveNumberInput, 
-                        onValueChange = { valveNumberInput = it }, 
-                        label = { Text("Valve Number / Area") }
-                    )
-                    // Open Time Picker
-                    Box(modifier = Modifier.clickable { openTimePickerDialog.show() }) {
-                        OutlinedTextField(
-                            value = openTimeInput, 
-                            onValueChange = {}, 
-                            label = { Text("Open Time") },
-                            readOnly = true,
-                            enabled = false, // To make it look like a button
-                            colors = OutlinedTextFieldDefaults.colors(
-                                disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                                disabledBorderColor = MaterialTheme.colorScheme.outline,
-                                disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    // Close Time Picker
-                    Box(modifier = Modifier.clickable { closeTimePickerDialog.show() }) {
-                        OutlinedTextField(
-                            value = closeTimeInput, 
-                            onValueChange = {}, 
-                            label = { Text("Close Time") },
-                            readOnly = true,
-                            enabled = false, // To make it look like a button
-                             colors = OutlinedTextFieldDefaults.colors(
-                                disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                                disabledBorderColor = MaterialTheme.colorScheme.outline,
-                                disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
+    if (showEditDialog) {
+        EditWaterScheduleDialog(
+            schedule = editingSchedule,
+            onDismiss = { showEditDialog = false },
+            onSave = {
+                if (editingSchedule == null) {
+                    viewModel.addWaterSchedule(it.valveNumber, it.startDateTimeMillis, it.endDateTimeMillis)
+                } else {
+                    viewModel.editWaterSchedule(it)
                 }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    if (valveNumberInput.isNotBlank() && openTimeInput.isNotBlank() && closeTimeInput.isNotBlank()) {
-                        viewModel.addWaterSchedule(valveNumberInput, dateForDialog, openTimeInput, closeTimeInput)
-                        showAddScheduleDialog = false
-                        // Reset fields
-                        valveNumberInput = ""
-                        openTimeInput = ""
-                        closeTimeInput = ""
-                    } else {
-                        Toast.makeText(context, "Please fill all fields", Toast.LENGTH_SHORT).show()
-                    }
-                }) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddScheduleDialog = false }) { Text("Cancel") }
+                showEditDialog = false
             }
         )
+    }
+
+    if (viewingSchedule != null) {
+        WaterScheduleDetailDialog(schedule = viewingSchedule!!, onDismiss = { viewingSchedule = null })
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        Text("Water Supply Calendar", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 16.dp))
-
-        // The Calendar View
-        DatePicker(
-            state = datePickerState,
-            title = null,
-            headline = null,
-            showModeToggle = false,
-            colors = DatePickerDefaults.colors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha=0.3f)
-            )
-        )
-
-        // Admin button to add a schedule for the selected date
-        if(isAdmin) {
-            Button(
-                onClick = { 
-                    // Reset time fields when opening the dialog
-                    openTimeInput = ""
-                    closeTimeInput = ""
-                    showAddScheduleDialog = true 
-                },
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                enabled = datePickerState.selectedDateMillis != null
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                val buttonText = if(datePickerState.selectedDateMillis != null)
-                    "Add Schedule for ${SimpleDateFormat("dd MMM", Locale.getDefault()).format(Date(selectedDateMillis))}"
-                else "Select a date to add a schedule"
-                Text(buttonText)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Water Supply Schedule", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Row {
+                if (isAdmin) {
+                    Button(onClick = { 
+                        editingSchedule = null
+                        showEditDialog = true 
+                    }) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Schedule")
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Add")
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(onClick = { showCalendar = !showCalendar }) {
+                    Icon(Icons.Default.DateRange, contentDescription = "Toggle Calendar")
+                }
             }
         }
+        
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
-        HorizontalDivider(modifier = Modifier.padding(bottom = 12.dp))
-
-        Text("Schedules for ${SimpleDateFormat("EEEE, dd MMM yyyy", Locale.getDefault()).format(Date(selectedDateMillis))}", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(8.dp))
-
-        // Get schedules for the selected day
-        val schedulesForSelectedDate = remember(selectedDateMillis, viewModel.waterSchedules) {
-            val cal1 = Calendar.getInstance().apply { timeInMillis = selectedDateMillis }
-            viewModel.waterSchedules.filter {
-                val cal2 = Calendar.getInstance().apply { timeInMillis = it.dateMillis }
-                cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
-                cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
-            }
-        }
-
-        if (schedulesForSelectedDate.isEmpty()) {
-            Box(modifier=Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                 Text("No schedules for this date.", color=Color.Gray)
-            }
+        if (showCalendar) {
+            Calendar(viewModel.waterSchedules)
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(schedulesForSelectedDate) { schedule ->
-                    WaterScheduleCard(schedule, isSuperAdmin, onDelete = { viewModel.deleteWaterSchedule(schedule.id) })
+            val now = System.currentTimeMillis()
+            val allSchedules = viewModel.waterSchedules
+                .filter { it.endDateTimeMillis >= now }
+
+            val (activeSchedules, upcomingSchedules) = allSchedules.partition { 
+                it.startDateTimeMillis <= now 
+            }
+
+            val schedulesToShow = activeSchedules + upcomingSchedules
+
+            if (schedulesToShow.isEmpty()) {
+                Box(modifier = Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    Text("No upcoming water schedules.", color = Color.Gray)
+                }
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(schedulesToShow) { schedule ->
+                        val isActive = now >= schedule.startDateTimeMillis && now <= schedule.endDateTimeMillis
+                        WaterScheduleCard(
+                            schedule = schedule,
+                            isAdmin = isAdmin,
+                            isActive = isActive,
+                            onDelete = { viewModel.deleteWaterSchedule(schedule.id) },
+                            onClick = {
+                                if (isAdmin) {
+                                    editingSchedule = it
+                                    showEditDialog = true
+                                } else {
+                                    viewingSchedule = it
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1123,9 +1306,273 @@ fun WaterScheduleScreen(viewModel: SocietyViewModel, isAdmin: Boolean, isSuperAd
 }
 
 @Composable
-fun WaterScheduleCard(schedule: WaterSchedule, isSuperAdmin: Boolean, onDelete: () -> Unit) {
+fun Calendar(schedules: List<WaterSchedule>) {
+    val calendar = Calendar.getInstance()
+    val today = calendar.get(Calendar.DAY_OF_YEAR)
+    val currentMonth = calendar.get(Calendar.MONTH)
+    val currentYear = calendar.get(Calendar.YEAR)
+
+    var selectedMonth by remember { mutableStateOf(currentMonth) }
+    var selectedYear by remember { mutableStateOf(currentYear) }
+    var selectedSchedules by remember { mutableStateOf<List<WaterSchedule>>(emptyList()) }
+
+    if (selectedSchedules.isNotEmpty()) {
+        DayScheduleDialog(
+            schedules = selectedSchedules,
+            onDismiss = { selectedSchedules = emptyList() }
+        )
+    }
+
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { 
+                if (selectedMonth == 0) {
+                    selectedMonth = 11
+                    selectedYear--
+                } else {
+                    selectedMonth--
+                }
+            }) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Previous Month")
+            }
+            Text(
+                text = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(calendar.apply { set(selectedYear, selectedMonth, 1) }.time),
+                style = MaterialTheme.typography.titleMedium
+            )
+            IconButton(onClick = { 
+                if (selectedMonth == 11) {
+                    selectedMonth = 0
+                    selectedYear++
+                } else {
+                    selectedMonth++
+                }
+            }) {
+                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Next Month")
+            }
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+        LazyVerticalGrid(columns = GridCells.Fixed(7)) {
+            // Days of the week
+            items(listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")) { day ->
+                Text(text = day, textAlign = TextAlign.Center, fontWeight = FontWeight.Bold)
+            }
+
+            calendar.set(selectedYear, selectedMonth, 1)
+            val firstDayOfMonth = calendar.get(Calendar.DAY_OF_WEEK) - 1
+            val daysInMonth = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
+
+            items(firstDayOfMonth) { 
+                Box(modifier = Modifier.size(40.dp))
+            }
+
+            items(daysInMonth) { day ->
+                val date = calendar.apply { set(selectedYear, selectedMonth, day + 1) }.timeInMillis
+                val schedulesForDay = schedules.filter {
+                    val scheduleCalendar = Calendar.getInstance().apply { timeInMillis = it.startDateTimeMillis }
+                    scheduleCalendar.get(Calendar.YEAR) == selectedYear &&
+                    scheduleCalendar.get(Calendar.MONTH) == selectedMonth &&
+                    scheduleCalendar.get(Calendar.DAY_OF_MONTH) == day + 1
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(if (schedulesForDay.isNotEmpty()) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                        .clickable { selectedSchedules = schedulesForDay },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = (day + 1).toString())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DayScheduleDialog(schedules: List<WaterSchedule>, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Schedules for the Day") },
+        text = {
+            LazyColumn {
+                if (schedules.isEmpty()) {
+                    item { Text("No schedules for this day.") }
+                } else {
+                    items(schedules) { schedule ->
+                        WaterScheduleCard(
+                            schedule = schedule,
+                            isAdmin = false,
+                            isActive = false,
+                            onDelete = {},
+                            onClick = {}
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
+
+@Composable
+fun WaterScheduleDetailDialog(schedule: WaterSchedule, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.WaterDrop, contentDescription = null) },
+        title = { Text("Water Schedule Details") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Valve / Area: ${schedule.valveNumber}", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                
+                HorizontalDivider()
+
+                val format = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
+                
+                Row {
+                    Text("Starts: ", fontWeight = FontWeight.Bold)
+                    Text(format.format(Date(schedule.startDateTimeMillis)))
+                }
+                 Row {
+                    Text("Ends:   ", fontWeight = FontWeight.Bold)
+                    Text(format.format(Date(schedule.endDateTimeMillis)))
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
+@Composable
+fun EditWaterScheduleDialog(
+    schedule: WaterSchedule?,
+    onDismiss: () -> Unit,
+    onSave: (WaterSchedule) -> Unit
+) {
+    val context = LocalContext.current
+    var valveNumber by remember { mutableStateOf(schedule?.valveNumber ?: "") }
+    val initialStartDate = schedule?.startDateTimeMillis ?: System.currentTimeMillis()
+    val initialEndDate = schedule?.endDateTimeMillis ?: (System.currentTimeMillis() + 3600000) // 1 hour later
+
+    var startDateTime by remember { mutableStateOf(Calendar.getInstance().apply { timeInMillis = initialStartDate }) }
+    var endDateTime by remember { mutableStateOf(Calendar.getInstance().apply { timeInMillis = initialEndDate }) }
+
+    val dateTimeFormat = remember { SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()) }
+
+    val startDatePickerDialog = DatePickerDialog(
+        context,
+        { _, year, month, dayOfMonth ->
+            startDateTime.set(year, month, dayOfMonth)
+        },
+        startDateTime.get(Calendar.YEAR),
+        startDateTime.get(Calendar.MONTH),
+        startDateTime.get(Calendar.DAY_OF_MONTH)
+    )
+
+    val startTimePickerDialog = TimePickerDialog(
+        context,
+        { _, hour, minute -> 
+            startDateTime.set(Calendar.HOUR_OF_DAY, hour)
+            startDateTime.set(Calendar.MINUTE, minute)
+        },
+        startDateTime.get(Calendar.HOUR_OF_DAY),
+        startDateTime.get(Calendar.MINUTE),
+        false
+    )
+
+    val endDatePickerDialog = DatePickerDialog(
+        context,
+        { _, year, month, dayOfMonth ->
+            endDateTime.set(year, month, dayOfMonth)
+        },
+        endDateTime.get(Calendar.YEAR),
+        endDateTime.get(Calendar.MONTH),
+        endDateTime.get(Calendar.DAY_OF_MONTH)
+    )
+
+    val endTimePickerDialog = TimePickerDialog(
+        context,
+        { _, hour, minute ->
+            endDateTime.set(Calendar.HOUR_OF_DAY, hour)
+            endDateTime.set(Calendar.MINUTE, minute)
+        },
+        endDateTime.get(Calendar.HOUR_OF_DAY),
+        endDateTime.get(Calendar.MINUTE),
+        false
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (schedule == null) "Add Schedule" else "Edit Schedule") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = valveNumber,
+                    onValueChange = { valveNumber = it },
+                    label = { Text("Valve Number / Area") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("FROM", style = MaterialTheme.typography.labelSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                     Button(onClick = { startDatePickerDialog.show() }, modifier = Modifier.weight(1f)) { Text("Date") }
+                     Button(onClick = { startTimePickerDialog.show() }, modifier = Modifier.weight(1f)) { Text("Time") }
+                }
+                Text(dateTimeFormat.format(startDateTime.time), style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+
+                HorizontalDivider(modifier = Modifier.padding(vertical=8.dp))
+
+                Text("TO", style = MaterialTheme.typography.labelSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                     Button(onClick = { endDatePickerDialog.show() }, modifier = Modifier.weight(1f)) { Text("Date") }
+                     Button(onClick = { endTimePickerDialog.show() }, modifier = Modifier.weight(1f)) { Text("Time") }
+                }
+                Text(dateTimeFormat.format(endDateTime.time), style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                val newSchedule = schedule?.copy(
+                    valveNumber = valveNumber,
+                    startDateTimeMillis = startDateTime.timeInMillis,
+                    endDateTimeMillis = endDateTime.timeInMillis
+                ) ?: WaterSchedule(
+                    valveNumber = valveNumber,
+                    startDateTimeMillis = startDateTime.timeInMillis,
+                    endDateTimeMillis = endDateTime.timeInMillis
+                )
+                onSave(newSchedule)
+            }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+
+@Composable
+fun WaterScheduleCard(
+    schedule: WaterSchedule, 
+    isAdmin: Boolean, 
+    isActive: Boolean,
+    onDelete: () -> Unit, 
+    onClick: (WaterSchedule) -> Unit
+) {
     ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().clickable { onClick(schedule) },
         shape = RoundedCornerShape(12.dp)
     ) {
         Row(
@@ -1138,15 +1585,25 @@ fun WaterScheduleCard(schedule: WaterSchedule, isSuperAdmin: Boolean, onDelete: 
                     Icon(Icons.Default.WaterDrop, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(text = "Valve: ${schedule.valveNumber}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    if (isActive) {
+                        Spacer(Modifier.width(8.dp))
+                        StatusBadge(statusText = "VALVE OPEN", color = Color(0xFF81C784))
+                    }
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(8.dp))
+                val format = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
                 Text(
-                    text = "Time: ${schedule.openTime} - ${schedule.closeTime}", 
+                    text = "From: ${format.format(Date(schedule.startDateTimeMillis))}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+                Text(
+                    text = "To:      ${format.format(Date(schedule.endDateTimeMillis))}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.secondary
                 )
             }
-            if (isSuperAdmin) {
+            if (isAdmin) {
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red)
                 }
@@ -1186,7 +1643,7 @@ fun InfoChip(
 }
 
 @Composable
-fun UserComplaintScreen(viewModel: SocietyViewModel) {
+fun UserComplaintScreen(viewModel: SocietyViewModel, userName: String) {
     val context = LocalContext.current
     val sharedPrefs = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
     val registeredHouse = sharedPrefs.getString("user_house", "") ?: ""
@@ -1196,14 +1653,38 @@ fun UserComplaintScreen(viewModel: SocietyViewModel) {
     var trackCompNumber by remember { mutableStateOf("") }
     var trackedComplaints by remember { mutableStateOf(emptyList<Complaint>()) }
     var lastSubmittedNumber by remember { mutableStateOf<String?>(null) }
+    var showComplaints by remember { mutableStateOf(false) }
     var hasSearched by remember { mutableStateOf(false) }
+    var selectedComplaint by remember { mutableStateOf<Complaint?>(null) }
     
     val clipboardManager = LocalClipboardManager.current
+
+    if (selectedComplaint != null) {
+        Dialog(onDismissRequest = { selectedComplaint = null }) {
+            Column {
+                ComplaintCard(
+                    complaint = selectedComplaint!!,
+                    onRatingSubmitted = { rating ->
+                        viewModel.submitRating(selectedComplaint!!.id, rating)
+                        selectedComplaint = null // Close on submit
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { selectedComplaint = null },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("Close")
+                }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        Text("Hi $userName", style = MaterialTheme.typography.titleLarge)
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
@@ -1224,33 +1705,35 @@ fun UserComplaintScreen(viewModel: SocietyViewModel) {
                 
                 Button(
                     onClick = { 
-                        trackedComplaints = viewModel.getComplaints(trackCompNumber, registeredHouse)
-                        hasSearched = true
+                        showComplaints = !showComplaints
+                        if (showComplaints) {
+                            trackedComplaints = viewModel.getComplaints(trackCompNumber, registeredHouse)
+                            hasSearched = true
+                        } else {
+                            hasSearched = false
+                        }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { 
                     Icon(Icons.Default.Search, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("View My Complaints") 
+                    Text(if (showComplaints) "Hide My Complaints" else "View My Complaints") 
                 }
 
-                if (trackedComplaints.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    trackedComplaints.forEach { complaint ->
-                        var isCardVisible by remember { mutableStateOf(true) }
-                        AnimatedVisibility(
-                            visible = isCardVisible,
-                            enter = expandVertically() + fadeIn(),
-                            exit = shrinkVertically() + fadeOut() + slideOutHorizontally()
-                        ) {
-                            ComplaintCard(complaint, onRatingSubmitted = { rating -> 
-                                viewModel.submitRating(complaint.id, rating)
-                                isCardVisible = false
-                            })
+                if (showComplaints) {
+                    if (trackedComplaints.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Column(modifier = Modifier.heightIn(max=400.dp).verticalScroll(rememberScrollState())) {
+                            trackedComplaints.forEach { complaint ->
+                                CompactComplaintCard(complaint = complaint) {
+                                    selectedComplaint = complaint
+                                }
+                                Spacer(Modifier.height(8.dp))
+                            }
                         }
+                    } else if (hasSearched) {
+                        Text("No complaints found for your house.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     }
-                } else if (hasSearched) {
-                    Text("No complaints found for your house.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -1263,7 +1746,7 @@ fun UserComplaintScreen(viewModel: SocietyViewModel) {
                 
                 OutlinedTextField(
                     value = registeredHouse, 
-                    onValueChange = {}, 
+                    onValueChange = {},
                     label = { Text("House Number") }, 
                     modifier = Modifier.fillMaxWidth(),
                     enabled = false,
@@ -1275,7 +1758,7 @@ fun UserComplaintScreen(viewModel: SocietyViewModel) {
                 
                 OutlinedTextField(
                     value = registeredPhone, 
-                    onValueChange = {}, 
+                    onValueChange = {},
                     label = { Text("Cell Number") }, 
                     modifier = Modifier.fillMaxWidth(),
                     enabled = false,
@@ -1330,23 +1813,105 @@ fun UserComplaintScreen(viewModel: SocietyViewModel) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AdminComplaintScreen(viewModel: SocietyViewModel, isSuperAdmin: Boolean) {
-    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    var selectedComplaint by remember { mutableStateOf<Complaint?>(null) }
+
+    if (selectedComplaint != null) {
+        Dialog(onDismissRequest = { selectedComplaint = null }) {
+            var complaintInDialog by remember { mutableStateOf(selectedComplaint!!) }
+
+            Column {
+                AdminComplaintCard(
+                    complaint = complaintInDialog,
+                    isSuperAdmin = isSuperAdmin,
+                    onDelete = {
+                        viewModel.deleteComplaint(complaintInDialog.id)
+                        selectedComplaint = null
+                    },
+                    onStatusChange = { newStatus ->
+                        viewModel.updateStatus(complaintInDialog.id, newStatus)
+                        complaintInDialog = complaintInDialog.copy(status = newStatus)
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { selectedComplaint = null },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("Close")
+                }
+            }
+        }
+    }
+
+    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { Text("Active Complaints", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        items(viewModel.complaints) { complaint ->
-            AdminComplaintCard(complaint, isSuperAdmin, onDelete = { viewModel.deleteComplaint(complaint.id) }) { status -> 
-                viewModel.updateStatus(complaint.id, status) 
+        items(viewModel.complaints, key = { it.id }) { complaint ->
+            val dismissState = rememberSwipeToDismissBoxState(
+                confirmValueChange = {
+                    if (it == SwipeToDismissBoxValue.EndToStart) {
+                        viewModel.deleteComplaint(complaint.id)
+                        true
+                    } else {
+                        false
+                    }
+                }
+            )
+
+            SwipeToDismissBox(
+                state = dismissState,
+                backgroundContent = {
+                    val color = when (dismissState.dismissDirection) {
+                        SwipeToDismissBoxValue.EndToStart -> Color.Red.copy(alpha = 0.5f)
+                        else -> Color.Transparent
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(color)
+                            .padding(12.dp),
+                        contentAlignment = Alignment.CenterEnd
+                    ) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = "Delete",
+                            tint = Color.White
+                        )
+                    }
+                }
+            ) {
+                CompactComplaintCard(complaint = complaint) {
+                    selectedComplaint = complaint
+                }
             }
         }
     }
 }
 
 @Composable
-fun AnnouncementScreen(viewModel: SocietyViewModel, isAdmin: Boolean, isSuperAdmin: Boolean) {
+fun AnnouncementScreen(viewModel: SocietyViewModel, isAdmin: Boolean) {
     var title by remember { mutableStateOf("") }
     var content by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
+    var selectedAnnouncement by remember { mutableStateOf<Announcement?>(null) }
+    val context = LocalContext.current
+    val sharedPrefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+    val userId = sharedPrefs.getString("user_phone", "") ?: ""
+
+    if (selectedAnnouncement != null) {
+        AnnouncementDetailsDialog(
+            announcement = selectedAnnouncement!!,
+            onDismiss = { selectedAnnouncement = null },
+            onReact = { reaction ->
+                viewModel.addReactionToAnnouncement(selectedAnnouncement!!.id, reaction, userId, isAdmin)
+            },
+            onShare = { announcement ->
+                shareAnnouncementAsText(context, announcement)
+            }
+        )
+    }
 
     if (showAddDialog) {
         AlertDialog(
@@ -1374,13 +1939,27 @@ fun AnnouncementScreen(viewModel: SocietyViewModel, isAdmin: Boolean, isSuperAdm
         LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Campaign, contentDescription = null, modifier = Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Default.Eco, contentDescription = null, modifier = Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(8.dp))
                     Text("Society Announcements", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 }
             }
             items(viewModel.announcements) { announcement ->
-                AnnouncementCard(announcement, isSuperAdmin, onDelete = { viewModel.deleteAnnouncement(announcement.id) })
+                AnnouncementCard(
+                    announcement = announcement,
+                    isAdmin = isAdmin,
+                    userId = userId,
+                    registeredUsers = viewModel.registeredUsers,
+                    onDelete = { viewModel.deleteAnnouncement(announcement.id) },
+                    onReact = { reaction ->
+                        viewModel.addReactionToAnnouncement(announcement.id, reaction, userId, isAdmin)
+                    },
+                    onShare = { 
+                        shareAnnouncementAsText(context, announcement)
+                        viewModel.shareAnnouncement(announcement.id, userId)
+                    },
+                    onClick = { selectedAnnouncement = announcement }
+                )
             }
         }
         if (isAdmin) {
@@ -1391,23 +1970,254 @@ fun AnnouncementScreen(viewModel: SocietyViewModel, isAdmin: Boolean, isSuperAdm
     }
 }
 
+private fun shareAnnouncementAsText(context: Context, announcement: Announcement) {
+    val shareText = "**${announcement.title}**\n\n${announcement.content}"
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, shareText)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share Announcement"))
+}
+
 @Composable
-fun AnnouncementCard(announcement: Announcement, isSuperAdmin: Boolean, onDelete: () -> Unit) {
-    val date = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(announcement.timestamp))
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
-            Icon(Icons.Default.Campaign, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.secondary)
-            Spacer(Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(announcement.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(date, style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(announcement.content, style = MaterialTheme.typography.bodyMedium)
-            }
-            if (isSuperAdmin) {
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red)
+fun ReactionDetailsDialog(
+    emoji: String,
+    userIds: List<String>,
+    allUsers: List<UserProfile>,
+    onDismiss: () -> Unit
+) {
+    val reactedUsers = userIds.mapNotNull { userId ->
+        allUsers.find { it.phone == userId }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Reacted with $emoji") },
+        text = {
+            if (reactedUsers.isEmpty()) {
+                Text("No one has reacted with this emoji yet.")
+            } else {
+                LazyColumn {
+                    items(reactedUsers) { user ->
+                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            Text("${user.name} (${user.houseNumber})", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
                 }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
+fun AnnouncementDetailsDialog(
+    announcement: Announcement, 
+    onDismiss: () -> Unit,
+    onReact: (String) -> Unit,
+    onShare: (Announcement) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(announcement.title) },
+        text = { 
+            Column {
+                Text(announcement.content) 
+                Spacer(modifier = Modifier.height(16.dp))
+                AnnouncementCardReactions(announcement = announcement, onReact = onReact, onShare = { onShare(announcement) })
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
+fun CompactAnnouncementCard(announcement: Announcement, onClick: () -> Unit) {
+    OutlinedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    ) {
+        Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp).fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp)) {
+                Text(
+                    text = announcement.title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(announcement.timestamp)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(Icons.Default.ChevronRight, contentDescription = "View Details")
+        }
+    }
+}
+
+
+@Composable
+fun AnnouncementCard(
+    announcement: Announcement,
+    isAdmin: Boolean,
+    userId: String,
+    registeredUsers: List<UserProfile>,
+    onDelete: () -> Unit,
+    onReact: (String) -> Unit,
+    onShare: () -> Unit,
+    onClick: () -> Unit
+) {
+    val date = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(announcement.timestamp))
+    var reactorsToShow by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
+
+    if (reactorsToShow != null) {
+        ReactionDetailsDialog(
+            emoji = reactorsToShow!!.first,
+            userIds = reactorsToShow!!.second,
+            allUsers = registeredUsers,
+            onDismiss = { reactorsToShow = null }
+        )
+    }
+
+    Card(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Column {
+            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
+                Icon(Icons.Default.Eco, contentDescription = null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.secondary)
+                Spacer(Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(announcement.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(date, style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(announcement.content, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (isAdmin) {
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Red)
+                    }
+                }
+            }
+
+            AnnouncementCardReactions(announcement = announcement, onReact = onReact, onShare = onShare)
+        }
+    }
+}
+
+@Composable
+fun AnnouncementCardReactions(
+    announcement: Announcement, 
+    onReact: (String) -> Unit, 
+    onShare: () -> Unit
+) {
+    val context = LocalContext.current
+    val sharedPrefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+    val userId = sharedPrefs.getString("user_phone", "") ?: ""
+    
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, bottom = 8.dp, top = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val reactionTypes = listOf("👍", "❤️", "😂")
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            reactionTypes.forEach { emoji ->
+                val reactors = announcement.reactions.filterValues { it == emoji }.keys
+                val count = reactors.size
+                val isSelected = announcement.reactions[userId] == emoji
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = emoji,
+                        fontSize = 24.sp,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable { onReact(emoji) }
+                            .background(
+                                if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                                else Color.Transparent
+                            )
+                            .padding(4.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = count.toString(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { 
+                                // No-op, since we don't want to show the list of reactors here
+                            }
+                            .padding(horizontal = 4.dp)
+                    )
+                }
+            }
+        }
+
+        IconButton(onClick = onShare) {
+            Icon(Icons.Default.Share, contentDescription = "Share")
+        }
+    }
+}
+
+@Composable
+fun CompactComplaintCard(complaint: Complaint, onClick: () -> Unit) {
+    val statusColor = when (complaint.status) {
+        ComplaintStatus.PENDING -> Color(0xFFE57373)
+        ComplaintStatus.IN_PROGRESS -> Color(0xFF64B5F6)
+        ComplaintStatus.RESOLVED -> Color(0xFF81C784)
+    }
+    OutlinedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    ) {
+        Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(5.dp)
+                    .background(statusColor)
+            )
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp).fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp)) {
+                    Text(
+                        text = complaint.complaintNumber,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "House: ${complaint.houseNumber}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                StatusBadge(complaint.status)
             }
         }
     }
@@ -1630,13 +2440,18 @@ fun StatusBadge(status: ComplaintStatus) {
         ComplaintStatus.IN_PROGRESS -> Color(0xFF64B5F6)
         ComplaintStatus.RESOLVED -> Color(0xFF81C784)
     }
+    StatusBadge(statusText = status.name, color = color)
+}
+
+@Composable
+fun StatusBadge(statusText: String, color: Color) {
     Surface(
         color = color.copy(alpha = 0.15f),
         shape = RoundedCornerShape(16.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.5f))
+        border = BorderStroke(1.dp, color.copy(alpha = 0.5f))
     ) {
         Text(
-            text = status.name,
+            text = statusText,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
             color = color,
             style = MaterialTheme.typography.labelSmall,

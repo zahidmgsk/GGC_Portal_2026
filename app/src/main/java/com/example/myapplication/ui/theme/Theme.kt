@@ -1,58 +1,109 @@
 package com.example.myapplication.ui.theme
 
 import android.app.Activity
-import android.os.Build
+import android.content.Context
+import android.content.SharedPreferences
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+
+enum class AppTheme(val displayName: String) {
+    DEFAULT("Default"),
+    RED("Red"),
+    GREEN("Green"),
+    BLUE("Blue"),
+    ORANGE("Orange")
+}
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Green80,
-    secondary = GreenGrey80,
-    tertiary = LightGreen80,
-    background = Color(0xFF1B1B1B),
-    surface = Color(0xFF212121),
-    onPrimary = Color.Black,
-    onSecondary = Color.Black,
-    onTertiary = Color.Black,
-    onBackground = Color.White,
-    onSurface = Color.White
+    primary = Purple80,
+    secondary = PurpleGrey80,
+    tertiary = Pink80
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Green40,
-    secondary = GreenGrey40,
-    tertiary = LightGreen40,
-    background = Color(0xFFF1F8E9), // Light green background
-    surface = Color.White,
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1B5E20),
-    onSurface = Color(0xFF1B5E20)
+    primary = Purple40,
+    secondary = PurpleGrey40,
+    tertiary = Pink40
 )
 
+private val RedColorScheme = lightColorScheme(
+    primary = RedPrimary,
+    secondary = RedSecondary,
+    tertiary = RedTertiary
+)
+
+private val GreenColorScheme = lightColorScheme(
+    primary = GreenPrimary,
+    secondary = GreenSecondary,
+    tertiary = GreenTertiary
+)
+
+private val BlueColorScheme = lightColorScheme(
+    primary = BluePrimary,
+    secondary = BlueSecondary,
+    tertiary = BlueTertiary
+)
+
+private val OrangeColorScheme = lightColorScheme(
+    primary = OrangePrimary,
+    secondary = OrangeSecondary,
+    tertiary = OrangeTertiary
+)
+
+class ThemeViewModel(private val sharedPreferences: SharedPreferences) : ViewModel() {
+
+    private val _theme = MutableStateFlow(getCurrentTheme())
+    val theme: StateFlow<AppTheme> = _theme
+
+    private fun getCurrentTheme(): AppTheme {
+        val themeName = sharedPreferences.getString("theme", AppTheme.DEFAULT.name) ?: AppTheme.DEFAULT.name
+        return AppTheme.valueOf(themeName)
+    }
+
+    fun setTheme(theme: AppTheme) {
+        viewModelScope.launch {
+            _theme.emit(theme)
+            sharedPreferences.edit().putString("theme", theme.name).apply()
+        }
+    }
+}
+
 @Composable
-fun MyApplicationTheme(
+fun ComplaintPortalTheme(
+    themeViewModel: ThemeViewModel,
     darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = false, // Disabled dynamic color to enforce green theme
     content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
+    val currentTheme by themeViewModel.theme.collectAsState()
+    val colorScheme = when (currentTheme) {
+        AppTheme.DEFAULT -> if (darkTheme) DarkColorScheme else LightColorScheme
+        AppTheme.RED -> RedColorScheme
+        AppTheme.GREEN -> GreenColorScheme
+        AppTheme.BLUE -> BlueColorScheme
+        AppTheme.ORANGE -> OrangeColorScheme
+    }
 
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as Activity).window
+            window.statusBarColor = colorScheme.primary.toArgb()
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = darkTheme
+        }
     }
 
     MaterialTheme(

@@ -600,18 +600,37 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
 
     var authState by remember { mutableStateOf(AuthState.LOGIN) }
     var currentUser by remember { mutableStateOf<UserProfile?>(null) }
+    var isAdminMode by remember { mutableStateOf(false) }
+    var isSuperAdminMode by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
 
     // Check initial auth state
-    LaunchedEffect(viewModel.registeredUsers) {
-        val loggedInHouse = sharedPrefs.getString("user_house", null)
-        if (loggedInHouse != null) {
-            val user = viewModel.registeredUsers.find { it.houseNumber.equals(loggedInHouse, ignoreCase = true) }
-            if (user != null) {
-                currentUser = user
-                authState = if (user.isApproved) AuthState.LOGGED_IN else AuthState.PENDING_APPROVAL
+    LaunchedEffect(viewModel.registeredUsers, viewModel.admins) {
+        val keepLoggedIn = sharedPrefs.getBoolean("keep_logged_in", false)
+        if (keepLoggedIn) {
+            val loggedInHouse = sharedPrefs.getString("user_house", null)
+            val loggedInAdmin = sharedPrefs.getString("admin_name", null)
+            val loggedInSuper = sharedPrefs.getBoolean("is_super_admin", false)
+
+            if (loggedInSuper) {
+                isSuperAdminMode = true
+                authState = AuthState.LOGGED_IN
+            } else if (loggedInAdmin != null) {
+                val admin = viewModel.admins.find { it.name.equals(loggedInAdmin, ignoreCase = true) }
+                if (admin != null || loggedInAdmin.equals("admin", ignoreCase = true)) {
+                    isAdminMode = true
+                    authState = AuthState.LOGGED_IN
+                }
+            } else if (loggedInHouse != null) {
+                val user = viewModel.registeredUsers.find { it.houseNumber.equals(loggedInHouse, ignoreCase = true) }
+                if (user != null) {
+                    currentUser = user
+                    authState = if (user.isApproved) AuthState.LOGGED_IN else AuthState.PENDING_APPROVAL
+                } else {
+                    authState = AuthState.LOGIN
+                }
             } else {
-                authState = AuthState.LOGIN // User might have been deleted
+                authState = AuthState.LOGIN
             }
         } else {
             authState = AuthState.LOGIN
@@ -641,10 +660,7 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
         }
     }
 
-    var isAdminMode by remember { mutableStateOf(false) }
-    var isSuperAdminMode by remember { mutableStateOf(false) }
     var showChangePasswordDialog by remember { mutableStateOf(false) }
-    var showNotificationCenter by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var showWelcomeScreen by remember { mutableStateOf(true) }
 
@@ -679,11 +695,22 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
             when (authState) {
                 AuthState.LOGIN -> {
                     LoginScreen(
-                        onLogin = { houseNumber, password ->
+                        onLogin = { houseNumber, password, keep ->
                             val user = viewModel.registeredUsers.find { it.houseNumber.equals(houseNumber, ignoreCase = true) }
                             if (user != null && user.password == password) {
                                 if (user.isApproved) {
-                                    sharedPrefs.edit().putString("user_house", user.houseNumber).apply()
+                                    sharedPrefs.edit().apply {
+                                        putBoolean("keep_logged_in", keep)
+                                        if (keep) {
+                                            putString("user_house", user.houseNumber)
+                                            putString("user_phone", user.phone)
+                                        } else {
+                                            remove("user_house")
+                                            remove("user_phone")
+                                        }
+                                        remove("admin_name")
+                                        remove("is_super_admin")
+                                    }.apply()
                                     currentUser = user
                                     authState = AuthState.LOGGED_IN
                                 } else {
@@ -694,13 +721,35 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                             }
                         },
                         onRegister = { authState = AuthState.REGISTER },
-                        onAdminLogin = { adminName, password ->
+                        onAdminLogin = { adminName, password, keep ->
                              val admin = viewModel.admins.find { it.name.equals(adminName, ignoreCase = true) && it.password == password }
                              if (admin != null || (adminName.equals("admin", ignoreCase = true) && password == viewModel.adminPassword)) {
+                                sharedPrefs.edit().apply {
+                                    putBoolean("keep_logged_in", keep)
+                                    if (keep) putString("admin_name", adminName)
+                                    else remove("admin_name")
+                                    remove("user_house")
+                                    remove("is_super_admin")
+                                }.apply()
                                 isAdminMode = true
                                 authState = AuthState.LOGGED_IN
                             } else {
                                 Toast.makeText(context, "Invalid Credentials", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onSuperAdminLogin = { name, password, keep ->
+                            if (name.equals("superadmin", ignoreCase = true) && password == viewModel.superAdminPassword) {
+                                sharedPrefs.edit().apply {
+                                    putBoolean("keep_logged_in", keep)
+                                    if (keep) putBoolean("is_super_admin", true)
+                                    else remove("is_super_admin")
+                                    remove("user_house")
+                                    remove("admin_name")
+                                }.apply()
+                                isSuperAdminMode = true
+                                authState = AuthState.LOGGED_IN
+                            } else {
+                                Toast.makeText(context, "Invalid Super Admin Credentials", Toast.LENGTH_SHORT).show()
                             }
                         }
                     )
@@ -716,7 +765,10 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                 }
                 AuthState.PENDING_APPROVAL -> {
                     PendingApprovalScreen(onLogout = {
-                        sharedPrefs.edit().clear().apply()
+                        sharedPrefs.edit().apply {
+                            remove("user_house")
+                            remove("keep_logged_in")
+                        }.apply()
                         authState = AuthState.LOGIN
                     })
                 }
@@ -726,17 +778,6 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                     } else {
                         val isAdmin = isAdminMode || isSuperAdminMode
                         val registeredHouse = currentUser?.houseNumber ?: ""
-
-                        if (showNotificationCenter) {
-                            NotificationCenterDialog(
-                                notifications = viewModel.notifications,
-                                isAdmin = isAdmin,
-                                userHouse = registeredHouse,
-                                onMarkRead = { notificationId -> viewModel.markNotificationAsRead(notificationId, isAdmin) },
-                                onMarkAllRead = { viewModel.markAllNotificationsAsRead(isAdmin, registeredHouse) },
-                                onDismiss = { showNotificationCenter = false }
-                            )
-                        }
                         
                         if (showChangePasswordDialog) {
                             if (isAdmin) {
@@ -820,7 +861,6 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                         }
 
                         Scaffold(
-                            modifier = Modifier.imePadding(),
                             topBar = {
                                 TopAppBar(
                                     title = { 
@@ -835,7 +875,7 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                                         )
                                     },
                                     actions = {
-                                        IconButton(onClick = { showNotificationCenter = true }) {
+                                        IconButton(onClick = { selectedTab = 0 }) {
                                             BadgedBox(
                                                 badge = { 
                                                     val unreadCount = if (isAdmin) {
@@ -859,7 +899,12 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                                             onClick = { 
                                                 isAdminMode = false
                                                 isSuperAdminMode = false
-                                                sharedPrefs.edit().clear().apply()
+                                                sharedPrefs.edit().apply {
+                                                    remove("user_house")
+                                                    remove("admin_name")
+                                                    remove("is_super_admin")
+                                                    remove("keep_logged_in")
+                                                }.apply()
                                                 authState = AuthState.LOGIN
                                             },
                                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
@@ -878,37 +923,43 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                             bottomBar = {
                                 NavigationBar {
                                     NavigationBarItem(
-                                        icon = { Icon(Icons.Default.ReportProblem, contentDescription = null) },
-                                        label = { Text("Complaints") },
+                                        icon = { Icon(Icons.Default.Notifications, contentDescription = null) },
+                                        label = { Text("Notifications") },
                                         selected = selectedTab == 0,
                                         onClick = { selectedTab = 0 }
                                     )
                                     NavigationBarItem(
-                                        icon = { Icon(Icons.Default.WaterDrop, contentDescription = null) },
-                                        label = { Text("Water Schedule") },
+                                        icon = { Icon(Icons.Default.ReportProblem, contentDescription = null) },
+                                        label = { Text("Complaints") },
                                         selected = selectedTab == 1,
                                         onClick = { selectedTab = 1 }
                                     )
                                     NavigationBarItem(
-                                        icon = { Icon(Icons.Default.Campaign, contentDescription = null) },
-                                        label = { Text("Announcements") },
+                                        icon = { Icon(Icons.Default.WaterDrop, contentDescription = null) },
+                                        label = { Text("Water Schedule") },
                                         selected = selectedTab == 2,
                                         onClick = { selectedTab = 2 }
+                                    )
+                                    NavigationBarItem(
+                                        icon = { Icon(Icons.Default.Campaign, contentDescription = null) },
+                                        label = { Text("Announcements") },
+                                        selected = selectedTab == 3,
+                                        onClick = { selectedTab = 3 }
                                     )
                                     if (isAdminMode || isSuperAdminMode) {
                                         NavigationBarItem(
                                             icon = { Icon(Icons.Default.People, contentDescription = null) },
                                             label = { Text("Users") },
-                                            selected = selectedTab == 3,
-                                            onClick = { selectedTab = 3 }
+                                            selected = selectedTab == 4,
+                                            onClick = { selectedTab = 4 }
                                         )
                                     }
                                     if (isSuperAdminMode) {
                                         NavigationBarItem(
                                             icon = { Icon(Icons.Default.AdminPanelSettings, contentDescription = null) },
                                             label = { Text("Admins") },
-                                            selected = selectedTab == 4,
-                                            onClick = { selectedTab = 4 }
+                                            selected = selectedTab == 5,
+                                            onClick = { selectedTab = 5 }
                                         )
                                     }
                                 }
@@ -920,13 +971,18 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                                 modifier = Modifier.padding(innerPadding).fillMaxSize()
                             ) {
                                 val userName = currentUser?.name ?: "Resident"
-                                Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                                Box(modifier = Modifier.fillMaxSize()) {
                                     when (selectedTab) {
-                                        0 -> if (isAdmin) AdminComplaintScreen(viewModel, isSuperAdminMode) else UserComplaintScreen(viewModel, userName)
-                                        1 -> WaterScheduleScreen(viewModel, isAdmin)
-                                        2 -> AnnouncementScreen(viewModel, isAdmin)
-                                        3 -> if (isAdmin) RegisteredUsersScreen(viewModel) else Box {}
-                                        4 -> if (isSuperAdminMode) AdminManagementScreen(viewModel) else Box { }
+                                        0 -> NotificationScreen(
+                                            viewModel = viewModel,
+                                            isAdmin = isAdmin,
+                                            userHouse = registeredHouse
+                                        )
+                                        1 -> if (isAdmin) AdminComplaintScreen(viewModel, isSuperAdminMode) else UserComplaintScreen(viewModel, currentUser ?: UserProfile())
+                                        2 -> WaterScheduleScreen(viewModel, isAdmin)
+                                        3 -> AnnouncementScreen(viewModel, isAdmin)
+                                        4 -> if (isAdmin) RegisteredUsersScreen(viewModel) else Box {}
+                                        5 -> if (isSuperAdminMode) AdminManagementScreen(viewModel) else Box { }
                                     }
                                 }
                             }
@@ -1291,96 +1347,95 @@ fun ThemeSelector(themeViewModel: ThemeViewModel) {
 }
 
 @Composable
-fun NotificationCenterDialog(
-    notifications: List<AppNotification>,
+fun NotificationScreen(
+    viewModel: SocietyViewModel,
     isAdmin: Boolean,
-    userHouse: String,
-    onMarkRead: (String) -> Unit,
-    onMarkAllRead: () -> Unit,
-    onDismiss: () -> Unit
+    userHouse: String
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Notifications")
-                TextButton(onClick = onMarkAllRead) {
-                    Text("Mark all read", fontSize = 12.sp)
-                }
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Notifications", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { viewModel.markAllNotificationsAsRead(isAdmin, userHouse) }) {
+                Text("Mark all read", fontSize = 12.sp)
             }
-        },
-        text = {
-            val filteredNotifications = if (isAdmin) {
-                notifications.filter { it.isForAdmin }
-            } else {
-                notifications.filter { !it.isForAdmin && (it.targetHouse == null || it.targetHouse == userHouse) }
-            }
-
-            if (filteredNotifications.isEmpty()) {
-                Text("No recent notifications.")
-            } else {
-                LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                    items(filteredNotifications) { notification ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    when {
-                                        !notification.isRead && notification.priority == NotificationPriority.HIGH ->
-                                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
-                                        !notification.isRead ->
-                                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
-                                        else -> Color.Transparent
-                                    }
-                                )
-                                .clickable { onMarkRead(notification.id) }
-                                .padding(8.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                val icon = when {
-                                    notification.priority == NotificationPriority.HIGH -> Icons.Default.Error
-                                    notification.isForAdmin -> Icons.Default.Warning
-                                    else -> Icons.Default.Info
-                                }
-                                val tint = when {
-                                    notification.priority == NotificationPriority.HIGH -> MaterialTheme.colorScheme.error
-                                    notification.isForAdmin -> MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.primary
-                                }
-                                Icon(
-                                    imageVector = icon,
-                                    contentDescription = null,
-                                    tint = tint,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    notification.title, 
-                                    fontWeight = if (notification.isRead) FontWeight.Normal else FontWeight.Bold, 
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                if (!notification.isRead) {
-                                    Spacer(Modifier.weight(1f))
-                                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
-                                }
-                            }
-                            Text(notification.message, style = MaterialTheme.typography.bodySmall)
-                            Text(
-                                SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(notification.timestamp)),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.Gray
-                            )
-                            HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onDismiss) { Text("Close") }
         }
-    )
+
+        val notifications = viewModel.notifications
+        val filteredNotifications = if (isAdmin) {
+            notifications.filter { it.isForAdmin }
+        } else {
+            notifications.filter { !it.isForAdmin && (it.targetHouse == null || it.targetHouse == userHouse) }
+        }
+
+        if (filteredNotifications.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No recent notifications.")
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(filteredNotifications) { notification ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                when {
+                                    !notification.isRead && notification.priority == NotificationPriority.HIGH ->
+                                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                                    !notification.isRead ->
+                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                                    else -> Color.Transparent
+                                }
+                            )
+                            .clickable { viewModel.markNotificationAsRead(notification.id, isAdmin) }
+                            .padding(12.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val icon = when {
+                                notification.priority == NotificationPriority.HIGH -> Icons.Default.Error
+                                notification.isForAdmin -> Icons.Default.Warning
+                                else -> Icons.Default.Info
+                            }
+                            val tint = when {
+                                notification.priority == NotificationPriority.HIGH -> MaterialTheme.colorScheme.error
+                                notification.isForAdmin -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.primary
+                            }
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                tint = tint,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                notification.title, 
+                                fontWeight = if (notification.isRead) FontWeight.Normal else FontWeight.Bold, 
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            if (!notification.isRead) {
+                                Spacer(Modifier.weight(1f))
+                                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(notification.message, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(notification.timestamp)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalAnimationApi::class)
@@ -1509,13 +1564,15 @@ fun RegistrationScreen(
 
 @Composable
 fun LoginScreen(
-    onLogin: (String, String) -> Unit,
+    onLogin: (String, String, Boolean) -> Unit,
     onRegister: () -> Unit,
-    onAdminLogin: (String, String) -> Unit
+    onAdminLogin: (String, String, Boolean) -> Unit,
+    onSuperAdminLogin: (String, String, Boolean) -> Unit
 ) {
     var houseNumber by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var showAdminLogin by remember { mutableStateOf(false) }
+    var keepMeLoggedIn by remember { mutableStateOf(false) }
+    var loginType by remember { mutableIntStateOf(0) } // 0: Resident, 1: Admin, 2: Super Admin
 
     var adminName by remember { mutableStateOf("") }
     var adminPassword by remember { mutableStateOf("") }
@@ -1534,7 +1591,7 @@ fun LoginScreen(
             shape = RoundedCornerShape(16.dp)
         ) {
             AnimatedContent(
-                targetState = showAdminLogin,
+                targetState = loginType,
                 transitionSpec = {
                     if (targetState > initialState) {
                         (slideInHorizontally { height -> height } + fadeIn()).togetherWith(slideOutHorizontally { height -> -height } + fadeOut())
@@ -1544,101 +1601,180 @@ fun LoginScreen(
                         SizeTransform(clip = false)
                     )
                 }, label = ""
-            ) { targetState ->
-                if (!targetState) {
-                    Column(
-                        modifier = Modifier.padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Lock,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            "Resident Login",
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        OutlinedTextField(
-                            value = houseNumber,
-                            onValueChange = { houseNumber = it },
-                            label = { Text("House Number") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Password (your phone number)") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-
-                        Button(
-                            onClick = { onLogin(houseNumber, password) },
-                            modifier = Modifier.fillMaxWidth().height(56.dp),
-                            shape = RoundedCornerShape(12.dp),
+            ) { targetType ->
+                when (targetType) {
+                    0 -> {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            Text("Login", fontSize = 18.sp)
-                        }
-                        
-                        TextButton(onClick = onRegister) {
-                            Text("New User? Register here")
-                        }
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(64.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "Resident Login",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold
+                            )
 
-                        TextButton(onClick = { showAdminLogin = true }) {
-                            Text("Login as Admin")
+                            OutlinedTextField(
+                                value = houseNumber,
+                                onValueChange = { houseNumber = it },
+                                label = { Text("House Number") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = password,
+                                onValueChange = { password = it },
+                                label = { Text("Password (your phone number)") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
+                                Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                            }
+
+                            Button(
+                                onClick = { onLogin(houseNumber, password, keepMeLoggedIn) },
+                                modifier = Modifier.fillMaxWidth().height(56.dp),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Text("Login", fontSize = 18.sp)
+                            }
+                            
+                            TextButton(onClick = onRegister) {
+                                Text("New User? Register here")
+                            }
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                TextButton(onClick = { loginType = 1 }) {
+                                    Text("Admin")
+                                }
+                                TextButton(onClick = { loginType = 2 }) {
+                                    Text("Super Admin")
+                                }
+                            }
                         }
                     }
-                } else {
-                    Column(
-                        modifier = Modifier.padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.AdminPanelSettings,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            "Admin Login",
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        OutlinedTextField(
-                            value = adminName,
-                            onValueChange = { adminName = it },
-                            label = { Text("Admin Name") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
-                            value = adminPassword,
-                            onValueChange = { adminPassword = it },
-                            label = { Text("Password") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-
-                        Button(
-                            onClick = { onAdminLogin(adminName, adminPassword) },
-                            modifier = Modifier.fillMaxWidth().height(56.dp),
-                            shape = RoundedCornerShape(12.dp),
+                    1 -> {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            Text("Login", fontSize = 18.sp)
-                        }
+                            Icon(
+                                Icons.Default.AdminPanelSettings,
+                                contentDescription = null,
+                                modifier = Modifier.size(64.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "Admin Login",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold
+                            )
 
-                        TextButton(onClick = { showAdminLogin = false }) {
-                            Text("Resident Login")
+                            OutlinedTextField(
+                                value = adminName,
+                                onValueChange = { adminName = it },
+                                label = { Text("Admin Name") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = adminPassword,
+                                onValueChange = { adminPassword = it },
+                                label = { Text("Password") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
+                                Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                            }
+
+                            Button(
+                                onClick = { onAdminLogin(adminName, adminPassword, keepMeLoggedIn) },
+                                modifier = Modifier.fillMaxWidth().height(56.dp),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Text("Login", fontSize = 18.sp)
+                            }
+
+                            TextButton(onClick = { loginType = 0 }) {
+                                Text("Resident Login")
+                            }
+                        }
+                    }
+                    2 -> {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.SupervisorAccount,
+                                contentDescription = null,
+                                modifier = Modifier.size(64.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "Super Admin Login",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            OutlinedTextField(
+                                value = adminName,
+                                onValueChange = { adminName = it },
+                                label = { Text("Super Admin Name") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = adminPassword,
+                                onValueChange = { adminPassword = it },
+                                label = { Text("Password") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
+                                Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                            }
+
+                            Button(
+                                onClick = { onSuperAdminLogin(adminName, adminPassword, keepMeLoggedIn) },
+                                modifier = Modifier.fillMaxWidth().height(56.dp),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Text("Login", fontSize = 18.sp)
+                            }
+
+                            TextButton(onClick = { loginType = 0 }) {
+                                Text("Resident Login")
+                            }
                         }
                     }
                 }
@@ -2219,11 +2355,10 @@ fun InfoChip(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun UserComplaintScreen(viewModel: SocietyViewModel, userName: String) {
+fun UserComplaintScreen(viewModel: SocietyViewModel, user: UserProfile) {
     val context = LocalContext.current
-    val sharedPrefs = remember { context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE) }
-    val registeredHouse = sharedPrefs.getString("user_house", "") ?: ""
-    val registeredPhone = sharedPrefs.getString("user_phone", "") ?: ""
+    val registeredHouse = user.houseNumber
+    val registeredPhone = user.phone
 
     val maintenanceNotification = viewModel.notifications
         .filter { it.targetHouse == registeredHouse && it.title == "Maintenance Charges Due" && !it.isRead }
@@ -2261,7 +2396,10 @@ fun UserComplaintScreen(viewModel: SocietyViewModel, userName: String) {
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .imePadding(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         maintenanceNotification?.let { notification ->
@@ -2292,7 +2430,7 @@ fun UserComplaintScreen(viewModel: SocietyViewModel, userName: String) {
             }
         }
 
-        Text("Hi $userName", style = MaterialTheme.typography.titleLarge)
+        Text("Hi ${user.name}", style = MaterialTheme.typography.titleLarge)
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
@@ -2380,8 +2518,7 @@ fun UserComplaintScreen(viewModel: SocietyViewModel, userName: String) {
                     value = description, 
                     onValueChange = { description = it }, 
                     label = { Text("Problem Description") }, 
-                    modifier = Modifier.fillMaxWidth(), 
-                    minLines = 3
+                    modifier = Modifier.fillMaxWidth()
                 )
                 
                 Button(

@@ -57,6 +57,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -692,90 +693,90 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
 
     ComplaintPortalTheme(themeViewModel = themeViewModel) {
         Box(modifier = Modifier.fillMaxSize()) {
-            when (authState) {
-                AuthState.LOGIN -> {
-                    LoginScreen(
-                        onLogin = { houseNumber, password, keep ->
-                            val user = viewModel.registeredUsers.find { it.houseNumber.equals(houseNumber, ignoreCase = true) }
-                            if (user != null && user.password == password) {
-                                if (user.isApproved) {
+            if (showWelcomeScreen) {
+                WelcomeScreen(onEnter = { showWelcomeScreen = false })
+            } else {
+                when (authState) {
+                    AuthState.LOGIN -> {
+                        LoginScreen(
+                            onLogin = { houseNumber, password, keep ->
+                                val user = viewModel.registeredUsers.find { it.houseNumber.equals(houseNumber, ignoreCase = true) }
+                                if (user != null && user.password == password) {
+                                    if (user.isApproved) {
+                                        sharedPrefs.edit().apply {
+                                            putBoolean("keep_logged_in", keep)
+                                            if (keep) {
+                                                putString("user_house", user.houseNumber)
+                                                putString("user_phone", user.phone)
+                                            } else {
+                                                remove("user_house")
+                                                remove("user_phone")
+                                            }
+                                            remove("admin_name")
+                                            remove("is_super_admin")
+                                        }.apply()
+                                        currentUser = user
+                                        authState = AuthState.LOGGED_IN
+                                    } else {
+                                        authState = AuthState.PENDING_APPROVAL
+                                    }
+                                } else {
+                                    Toast.makeText(context, "Invalid Credentials", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onRegister = { authState = AuthState.REGISTER },
+                            onAdminLogin = { adminName, password, keep ->
+                                val admin = viewModel.admins.find { it.name.equals(adminName, ignoreCase = true) && it.password == password }
+                                if (admin != null || (adminName.equals("admin", ignoreCase = true) && password == viewModel.adminPassword)) {
                                     sharedPrefs.edit().apply {
                                         putBoolean("keep_logged_in", keep)
-                                        if (keep) {
-                                            putString("user_house", user.houseNumber)
-                                            putString("user_phone", user.phone)
-                                        } else {
-                                            remove("user_house")
-                                            remove("user_phone")
-                                        }
-                                        remove("admin_name")
+                                        if (keep) putString("admin_name", adminName)
+                                        else remove("admin_name")
+                                        remove("user_house")
                                         remove("is_super_admin")
                                     }.apply()
-                                    currentUser = user
+                                    isAdminMode = true
                                     authState = AuthState.LOGGED_IN
                                 } else {
-                                    authState = AuthState.PENDING_APPROVAL
+                                    Toast.makeText(context, "Invalid Credentials", Toast.LENGTH_SHORT).show()
                                 }
-                            } else {
-                                Toast.makeText(context, "Invalid Credentials", Toast.LENGTH_SHORT).show()
+                            },
+                            onSuperAdminLogin = { name, password, keep ->
+                                if (name.equals("superadmin", ignoreCase = true) && password == viewModel.superAdminPassword) {
+                                    sharedPrefs.edit().apply {
+                                        putBoolean("keep_logged_in", keep)
+                                        if (keep) putBoolean("is_super_admin", true)
+                                        else remove("is_super_admin")
+                                        remove("user_house")
+                                        remove("admin_name")
+                                    }.apply()
+                                    isSuperAdminMode = true
+                                    authState = AuthState.LOGGED_IN
+                                } else {
+                                    Toast.makeText(context, "Invalid Super Admin Credentials", Toast.LENGTH_SHORT).show()
+                                }
                             }
-                        },
-                        onRegister = { authState = AuthState.REGISTER },
-                        onAdminLogin = { adminName, password, keep ->
-                             val admin = viewModel.admins.find { it.name.equals(adminName, ignoreCase = true) && it.password == password }
-                             if (admin != null || (adminName.equals("admin", ignoreCase = true) && password == viewModel.adminPassword)) {
-                                sharedPrefs.edit().apply {
-                                    putBoolean("keep_logged_in", keep)
-                                    if (keep) putString("admin_name", adminName)
-                                    else remove("admin_name")
-                                    remove("user_house")
-                                    remove("is_super_admin")
-                                }.apply()
-                                isAdminMode = true
-                                authState = AuthState.LOGGED_IN
-                            } else {
-                                Toast.makeText(context, "Invalid Credentials", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        onSuperAdminLogin = { name, password, keep ->
-                            if (name.equals("superadmin", ignoreCase = true) && password == viewModel.superAdminPassword) {
-                                sharedPrefs.edit().apply {
-                                    putBoolean("keep_logged_in", keep)
-                                    if (keep) putBoolean("is_super_admin", true)
-                                    else remove("is_super_admin")
-                                    remove("user_house")
-                                    remove("admin_name")
-                                }.apply()
-                                isSuperAdminMode = true
-                                authState = AuthState.LOGGED_IN
-                            } else {
-                                Toast.makeText(context, "Invalid Super Admin Credentials", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    )
-                }
-                AuthState.REGISTER -> {
-                    RegistrationScreen(
-                        onRegister = { name, phone, cnic, house, type ->
-                            viewModel.registerUser(name, phone, cnic, house, type)
-                            authState = AuthState.PENDING_APPROVAL
-                        },
-                        onBackToLogin = { authState = AuthState.LOGIN }
-                    )
-                }
-                AuthState.PENDING_APPROVAL -> {
-                    PendingApprovalScreen(onLogout = {
-                        sharedPrefs.edit().apply {
-                            remove("user_house")
-                            remove("keep_logged_in")
-                        }.apply()
-                        authState = AuthState.LOGIN
-                    })
-                }
-                AuthState.LOGGED_IN -> {
-                     if (showWelcomeScreen && !isAdminMode && !isSuperAdminMode) {
-                        WelcomeScreen(onEnter = { showWelcomeScreen = false })
-                    } else {
+                        )
+                    }
+                    AuthState.REGISTER -> {
+                        RegistrationScreen(
+                            onRegister = { name, phone, cnic, house, type ->
+                                viewModel.registerUser(name, phone, cnic, house, type)
+                                authState = AuthState.PENDING_APPROVAL
+                            },
+                            onBackToLogin = { authState = AuthState.LOGIN }
+                        )
+                    }
+                    AuthState.PENDING_APPROVAL -> {
+                        PendingApprovalScreen(onLogout = {
+                            sharedPrefs.edit().apply {
+                                remove("user_house")
+                                remove("keep_logged_in")
+                            }.apply()
+                            authState = AuthState.LOGIN
+                        })
+                    }
+                    AuthState.LOGGED_IN -> {
                         val isAdmin = isAdminMode || isSuperAdminMode
                         val registeredHouse = currentUser?.houseNumber ?: ""
                         
@@ -1564,17 +1565,22 @@ fun RegistrationScreen(
 
 @Composable
 fun LoginScreen(
-    onLogin: (String, String, Boolean) -> Unit,
+    onLogin: (String, String, Boolean, Boolean) -> Unit,
     onRegister: () -> Unit,
-    onAdminLogin: (String, String, Boolean) -> Unit,
-    onSuperAdminLogin: (String, String, Boolean) -> Unit
+    onAdminLogin: (String, String, Boolean, Boolean) -> Unit,
+    onSuperAdminLogin: (String, String, Boolean, Boolean) -> Unit,
+    initialHouseNumber: String = "",
+    initialAdminName: String = "",
+    initialRememberUsername: Boolean = false
 ) {
-    var houseNumber by remember { mutableStateOf("") }
+    var houseNumber by remember { mutableStateOf(initialHouseNumber) }
     var password by remember { mutableStateOf("") }
     var keepMeLoggedIn by remember { mutableStateOf(false) }
+    var rememberUsername by remember { mutableStateOf(initialRememberUsername) }
+    var passwordVisible by remember { mutableStateOf(false) }
     var loginType by remember { mutableIntStateOf(0) } // 0: Resident, 1: Admin, 2: Super Admin
 
-    var adminName by remember { mutableStateOf("") }
+    var adminName by remember { mutableStateOf(initialAdminName) }
     var adminPassword by remember { mutableStateOf("") }
 
     Box(
@@ -1632,21 +1638,37 @@ fun LoginScreen(
                                 value = password,
                                 onValueChange = { password = it },
                                 label = { Text("Password (your phone number)") },
-                                visualTransformation = PasswordVisualTransformation(),
+                                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                                 modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
+                                singleLine = true,
+                                trailingIcon = {
+                                    val image = if (passwordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff
+                                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                        Icon(imageVector = image, contentDescription = if (passwordVisible) "Hide password" else "Show password")
+                                    }
+                                }
                             )
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
-                                Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { rememberUsername = !rememberUsername },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = rememberUsername, onCheckedChange = { rememberUsername = it })
+                                    Text("Remember House Number", style = MaterialTheme.typography.bodyMedium)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
+                                    Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                                }
                             }
 
                             Button(
-                                onClick = { onLogin(houseNumber, password, keepMeLoggedIn) },
+                                onClick = { onLogin(houseNumber, password, keepMeLoggedIn, rememberUsername) },
                                 modifier = Modifier.fillMaxWidth().height(56.dp),
                                 shape = RoundedCornerShape(12.dp),
                             ) {
@@ -1696,21 +1718,37 @@ fun LoginScreen(
                                 value = adminPassword,
                                 onValueChange = { adminPassword = it },
                                 label = { Text("Password") },
-                                visualTransformation = PasswordVisualTransformation(),
+                                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                                 modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
+                                singleLine = true,
+                                trailingIcon = {
+                                    val image = if (passwordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff
+                                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                        Icon(imageVector = image, contentDescription = if (passwordVisible) "Hide password" else "Show password")
+                                    }
+                                }
                             )
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
-                                Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { rememberUsername = !rememberUsername },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = rememberUsername, onCheckedChange = { rememberUsername = it })
+                                    Text("Remember Admin Name", style = MaterialTheme.typography.bodyMedium)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
+                                    Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                                }
                             }
 
                             Button(
-                                onClick = { onAdminLogin(adminName, adminPassword, keepMeLoggedIn) },
+                                onClick = { onAdminLogin(adminName, adminPassword, keepMeLoggedIn, rememberUsername) },
                                 modifier = Modifier.fillMaxWidth().height(56.dp),
                                 shape = RoundedCornerShape(12.dp),
                             ) {
@@ -1751,21 +1789,37 @@ fun LoginScreen(
                                 value = adminPassword,
                                 onValueChange = { adminPassword = it },
                                 label = { Text("Password") },
-                                visualTransformation = PasswordVisualTransformation(),
+                                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                                 modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
+                                singleLine = true,
+                                trailingIcon = {
+                                    val image = if (passwordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff
+                                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                        Icon(imageVector = image, contentDescription = if (passwordVisible) "Hide password" else "Show password")
+                                    }
+                                }
                             )
 
-                            Row(
-                                modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
-                                Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { rememberUsername = !rememberUsername },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = rememberUsername, onCheckedChange = { rememberUsername = it })
+                                    Text("Remember Super Admin Name", style = MaterialTheme.typography.bodyMedium)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().clickable { keepMeLoggedIn = !keepMeLoggedIn },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(checked = keepMeLoggedIn, onCheckedChange = { keepMeLoggedIn = it })
+                                    Text("Keep me logged in", style = MaterialTheme.typography.bodyMedium)
+                                }
                             }
 
                             Button(
-                                onClick = { onSuperAdminLogin(adminName, adminPassword, keepMeLoggedIn) },
+                                onClick = { onSuperAdminLogin(adminName, adminPassword, keepMeLoggedIn, rememberUsername) },
                                 modifier = Modifier.fillMaxWidth().height(56.dp),
                                 shape = RoundedCornerShape(12.dp),
                             ) {

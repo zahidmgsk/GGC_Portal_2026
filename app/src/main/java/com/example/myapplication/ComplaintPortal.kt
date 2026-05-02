@@ -691,6 +691,10 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
         selectedTab = 0
     }
 
+    val initialHouseNumber = remember { sharedPrefs.getString("remembered_house", "") ?: "" }
+    val initialAdminName = remember { sharedPrefs.getString("remembered_admin_name", "") ?: "" }
+    val initialRememberUsername = remember { sharedPrefs.getBoolean("remember_username", false) }
+
     ComplaintPortalTheme(themeViewModel = themeViewModel) {
         Box(modifier = Modifier.fillMaxSize()) {
             if (showWelcomeScreen) {
@@ -699,12 +703,16 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                 when (authState) {
                     AuthState.LOGIN -> {
                         LoginScreen(
-                            onLogin = { houseNumber, password, keep ->
+                            onLogin = { houseNumber, password, keep, remember ->
                                 val user = viewModel.registeredUsers.find { it.houseNumber.equals(houseNumber, ignoreCase = true) }
                                 if (user != null && user.password == password) {
                                     if (user.isApproved) {
                                         sharedPrefs.edit().apply {
                                             putBoolean("keep_logged_in", keep)
+                                            putBoolean("remember_username", remember)
+                                            if (remember) putString("remembered_house", houseNumber)
+                                            else remove("remembered_house")
+                                            
                                             if (keep) {
                                                 putString("user_house", user.houseNumber)
                                                 putString("user_phone", user.phone)
@@ -725,11 +733,15 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                                 }
                             },
                             onRegister = { authState = AuthState.REGISTER },
-                            onAdminLogin = { adminName, password, keep ->
+                            onAdminLogin = { adminName, password, keep, remember ->
                                 val admin = viewModel.admins.find { it.name.equals(adminName, ignoreCase = true) && it.password == password }
                                 if (admin != null || (adminName.equals("admin", ignoreCase = true) && password == viewModel.adminPassword)) {
                                     sharedPrefs.edit().apply {
                                         putBoolean("keep_logged_in", keep)
+                                        putBoolean("remember_username", remember)
+                                        if (remember) putString("remembered_admin_name", adminName)
+                                        else remove("remembered_admin_name")
+
                                         if (keep) putString("admin_name", adminName)
                                         else remove("admin_name")
                                         remove("user_house")
@@ -741,10 +753,14 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                                     Toast.makeText(context, "Invalid Credentials", Toast.LENGTH_SHORT).show()
                                 }
                             },
-                            onSuperAdminLogin = { name, password, keep ->
+                            onSuperAdminLogin = { name, password, keep, remember ->
                                 if (name.equals("superadmin", ignoreCase = true) && password == viewModel.superAdminPassword) {
                                     sharedPrefs.edit().apply {
                                         putBoolean("keep_logged_in", keep)
+                                        putBoolean("remember_username", remember)
+                                        if (remember) putString("remembered_admin_name", name)
+                                        else remove("remembered_admin_name")
+
                                         if (keep) putBoolean("is_super_admin", true)
                                         else remove("is_super_admin")
                                         remove("user_house")
@@ -755,7 +771,10 @@ fun ComplaintPortalApp(viewModel: SocietyViewModel = viewModel()) {
                                 } else {
                                     Toast.makeText(context, "Invalid Super Admin Credentials", Toast.LENGTH_SHORT).show()
                                 }
-                            }
+                            },
+                            initialHouseNumber = initialHouseNumber,
+                            initialAdminName = initialAdminName,
+                            initialRememberUsername = initialRememberUsername
                         )
                     }
                     AuthState.REGISTER -> {

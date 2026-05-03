@@ -13,7 +13,6 @@ To get started, download the latest version of the app directly from the GitHub 
 
 [![Download APK](https://img.shields.io/badge/Download-APK-brightgreen.svg?style=for-the-badge&logo=android)](https://github.com/zahidmgsk/GGC_Portal_2026/releases)
 
-*(Note: Replace `YOUR_USERNAME` and `YOUR_REPO_NAME` in the URL above with your actual GitHub details.)*
 
 ---
 

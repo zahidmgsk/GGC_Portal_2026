@@ -11,7 +11,10 @@
 
 To get started, download the latest version of the app directly from the link below:
 
-[![Download APK](https://img.shields.io/badge/Download-Latest_APK-brightgreen.svg?style=for-the-badge&logo=android)](https://github.com/zahidmgsk/GGC_Portal_2026/releases/download/Version100/app-release.apk)
+[![Download APK](https://img.shields.io/badge/Download-Latest_APK-brightgreen.svg?style=for-the-badge&logo=android)](https://github.com/zahidmgsk/GGC_Portal_2026/releases/download/Version100/GGC_Portal.apk)
+
+### 🕰 Older Versions
+Access previous releases and change logs on the [GitHub Releases page](https://github.com/zahidmgsk/GGC_Portal_2026/releases).
 
 
 ---

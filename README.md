@@ -1,7 +1,7 @@
 # KN Gohar Green City (GGC) Residents Portal
 
 <div align="center">
-  <img src="metadata/app_icon.png" width="150" alt="KN GGC Portal Icon">
+  <h1>🏡</h1>
   <h3>Your Smart Residents Portal</h3>
 </div>
 

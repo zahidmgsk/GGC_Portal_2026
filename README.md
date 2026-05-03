@@ -9,9 +9,9 @@
 
 ## 📥 Download Application
 
-To get started, download the latest version of the app directly from the GitHub Releases page:
+To get started, download the latest version of the app directly from the link below:
 
-[![Download APK](https://img.shields.io/badge/Download-APK-brightgreen.svg?style=for-the-badge&logo=android)](https://github.com/zahidmgsk/GGC_Portal_2026/releases)
+[![Download APK](https://img.shields.io/badge/Download-Latest_APK-brightgreen.svg?style=for-the-badge&logo=android)](https://github.com/zahidmgsk/GGC_Portal_2026/releases/download/Version100/app-release.apk)
 
 
 ---
